@@ -21,7 +21,7 @@ PRICE = "200 ETB"
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Hardcoded DeepSeek API key
+# DeepSeek client with hardcoded key
 client = OpenAI(api_key="sk-9681a031a1724260b293283f47438bd2", base_url="https://api.deepseek.com")
 
 # --- Helper Functions ---
