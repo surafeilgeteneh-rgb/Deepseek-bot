@@ -8,7 +8,7 @@ from openai import OpenAI
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 PAID_GROUP_ID = os.environ.get("PAID_GROUP_ID")
-ADMIN_CHANNEL_ID = os.environ.get("ADMIN_CHANNEL_ID")  # Where payment proofs go
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # Your Telegram user ID
 
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -39,7 +39,7 @@ async def get_deepseek_response(user_message: str) -> str:
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant for Ethiopian university students. Answer questions about departments, job outlook, salary, AI risk, and career paths. Keep answers concise and helpful."},
+                {"role": "system", "content": "You are a helpful assistant for Ethiopian university students. Answer questions about departments, job outlook, salary, AI risk, and career paths. Keep answers concise."},
                 {"role": "user", "content": user_message}
             ],
             stream=False
@@ -47,68 +47,43 @@ async def get_deepseek_response(user_message: str) -> str:
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"DeepSeek API error: {e}")
-        return "Sorry, I'm having trouble connecting to my knowledge base. Please try again later."
+        return "Sorry, I'm having trouble connecting to my knowledge base."
 
 # --- Bot Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome message"""
     await update.message.reply_text(
         "🎓 *Welcome to Campus Department Guide!*\n\n"
-        "I help Ethiopian students choose the right university department.\n\n"
-        "*Commands:*\n"
         "/pay - Unlock full access (200 ETB)\n"
         "/status - Check your subscription\n"
-        "/help - Get support\n\n"
-        "Ask me anything about departments, job outlook, or career paths!",
+        "/help - Get support",
         parse_mode="Markdown"
     )
 
 async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send payment instructions"""
     message = (
         "💳 *Payment Options*\n\n"
-        f"🇪🇹 *CBE Birr*\n"
-        f"Account: `{CBE_ACCOUNT}`\n"
-        f"Name: {CBE_NAME}\n\n"
-        f"📱 *Telebirr*\n"
-        f"Number: `{TELEBIRR_NUMBER}`\n"
-        f"Name: {TELEBIRR_NAME}\n\n"
+        f"🇪🇹 *CBE Birr*\nAccount: `{CBE_ACCOUNT}`\nName: {CBE_NAME}\n\n"
+        f"📱 *Telebirr*\nNumber: `{TELEBIRR_NUMBER}`\nName: {TELEBIRR_NAME}\n\n"
         f"💰 *Amount:* {PRICE}\n\n"
-        "📸 *After payment:*\n"
-        "Upload your payment screenshot here.\n"
-        "You will be added to the paid group within 1 hour."
+        "📸 *After payment:* Upload screenshot here."
     )
     await update.message.reply_text(message, parse_mode="Markdown")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check if user is in paid group"""
     user_id = update.effective_user.id
     if await is_user_in_paid_group(user_id, context):
         await update.message.reply_text("✅ You have active paid access.")
     else:
-        await update.message.reply_text("❌ You do not have paid access. Use /pay to unlock.")
+        await update.message.reply_text("❌ No paid access. Use /pay.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help message"""
-    await update.message.reply_text(
-        "📚 *Campus Department Guide Help*\n\n"
-        "*Free Features:*\n"
-        "• Browse department previews in our channel\n\n"
-        "*Paid Features (200 ETB):*\n"
-        "• Ask me anything about any department\n"
-        "• Get salary ranges, AI risk scores, job outlook\n"
-        "• Masters pathways and NGO opportunities\n\n"
-        "Use /pay to unlock full access.",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("📚 Ask me about departments, salary, AI risk, or job outlook. Use /pay for full access.")
 
-# --- Handle Messages (AI Response) ---
+# --- AI Response for Paid Users ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages - AI response for paid users"""
     user_id = update.effective_user.id
     user_message = update.message.text
 
-    # Skip commands
     if user_message.startswith('/'):
         return
 
@@ -117,87 +92,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai_response = await get_deepseek_response(user_message)
         await update.message.reply_text(ai_response)
     else:
-        await update.message.reply_text(
-            "🔒 This assistant is for paid members only.\n"
-            "Use /pay to unlock full access (200 ETB)."
+        await update.message.reply_text("🔒 Paid members only. Use /pay.")
+
+# --- Handle Payment Screenshots (Forward to YOU) ---
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    photo = update.message.photo[-1]
+
+    # Forward to you (admin)
+    if ADMIN_ID:
+        keyboard = [[InlineKeyboardButton(
+            f"✅ Approve @{user.username or user.id}", 
+            callback_data=f"approve_{user.id}"
+        )]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await context.bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=photo.file_id,
+            caption=f"📸 Payment from @{user.username or user.id}\nID: `{user.id}`",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
 
-# --- Handle Payment Screenshots ---
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Forward payment screenshots to admin channel with approve button"""
-    user = update.effective_user
-    photo = update.message.photo[-1]  # Highest resolution
-
-    # Create approve button
-    keyboard = [[InlineKeyboardButton(
-        f"✅ Approve @{user.username or user.id}", 
-        callback_data=f"approve_{user.id}"
-    )]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Forward to admin channel
-    await context.bot.send_photo(
-        chat_id=ADMIN_CHANNEL_ID,
-        photo=photo.file_id,
-        caption=f"📸 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-
-    # Confirm to user
-    await update.message.reply_text(
-        "✅ Payment screenshot received!\n"
-        "You will be added to the paid group within 1 hour after verification."
-    )
+    await update.message.reply_text("✅ Screenshot received. You'll be added within 1 hour.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle PDF/image files as payment proof"""
     user = update.effective_user
     document = update.message.document
 
-    keyboard = [[InlineKeyboardButton(
-        f"✅ Approve @{user.username or user.id}", 
-        callback_data=f"approve_{user.id}"
-    )]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    if ADMIN_ID:
+        keyboard = [[InlineKeyboardButton(
+            f"✅ Approve @{user.username or user.id}", 
+            callback_data=f"approve_{user.id}"
+        )]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.send_document(
-        chat_id=ADMIN_CHANNEL_ID,
-        document=document.file_id,
-        caption=f"📎 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+        await context.bot.send_document(
+            chat_id=ADMIN_ID,
+            document=document.file_id,
+            caption=f"📎 Payment from @{user.username or user.id}\nID: `{user.id}`",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
-    await update.message.reply_text("✅ Payment document received! You will be added within 1 hour.")
+    await update.message.reply_text("✅ Document received. You'll be added within 1 hour.")
 
-# --- Admin Approve Callback ---
+# --- Admin Approve Button ---
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle admin clicking Approve button"""
     query = update.callback_query
     await query.answer()
 
-    # Extract user_id from callback data
     user_id = int(query.data.replace("approve_", ""))
 
     try:
-        # Create one-time invite link
         invite_link = await context.bot.create_chat_invite_link(
             chat_id=PAID_GROUP_ID,
             member_limit=1
         )
 
-        # Send link to user
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Your payment has been verified!\n\n"
-                 f"🔗 Join the paid group here (one-time use):\n{invite_link.invite_link}\n\n"
-                 f"After joining, you can ask me questions about any department!"
+            text=f"✅ Payment verified!\n\n🔗 Join here (one-time use):\n{invite_link.invite_link}"
         )
 
-        # Update admin message
         await query.edit_message_caption(
-            caption=f"{query.message.caption}\n\n✅ APPROVED by admin"
+            caption=f"{query.message.caption}\n\n✅ APPROVED"
         )
 
     except Exception as e:
@@ -213,18 +173,13 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("pay", pay))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("help", help_command))
-
-    # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-
-    # Callback handler for approve button
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
 
     logger.info("Starting webhook...")
