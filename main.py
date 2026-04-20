@@ -19,7 +19,7 @@ SUPPORT_USERNAME = "@Enha127"
 
 # Gemini API
 GEMINI_API_KEY = "AIzaSyBk7-6IjVwt5ISVrOS-2MOKKpxwGjC0B2I"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
