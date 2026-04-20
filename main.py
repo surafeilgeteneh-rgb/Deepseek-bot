@@ -9,21 +9,25 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PAID_GROUP_ID = os.environ.get("PAID_GROUP_ID")
 ADMIN_CHANNEL_ID = os.environ.get("ADMIN_CHANNEL_ID")
 
-# Payment details
-CBE_ACCOUNT = "1000647705808"
-CBE_NAME = "Yosef"
-TELEBIRR_NUMBER = "0967523107"
-TELEBIRR_NAME = "Yosef"
+# Payment details - UPDATED
+TELEBIRR_NUMBER = "0932223736"
+TELEBIRR_NAME = "Banch"
+CBE_ACCOUNT = "1000748634456"
+CBE_NAME = "Banch"
 PRICE = "70 ETB"
+SUPPORT_USERNAME = "@Enha127"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# DeepSeek client
-client = OpenAI(api_key="sk-9681a031a1724260b293283f47438bd2", base_url="https://api.deepseek.com")
+# Gemini client - FREE
+client = OpenAI(
+    api_key="AIzaSyBk7-6IjVwt5ISVrOS-2MOKKpxwGjC0B2I",
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
 
 # System prompt for AI
-SYSTEM_PROMPT = """You are a helpful assistant for Ethiopian university students. Your name is Campus Guide.
+SYSTEM_PROMPT = f"""You are a helpful assistant for Ethiopian university students. Your name is Campus Guide.
 
 Your purpose:
 - Help students choose the right university department
@@ -31,13 +35,15 @@ Your purpose:
 - Guide students on how to pay for full access (70 ETB via CBE or Telebirr)
 
 Payment information:
-- CBE Birr: 1000647705808 (Yosef)
-- Telebirr: 0967523107 (Yosef)
-- Amount: 70 ETB
+- Telebirr: {TELEBIRR_NUMBER} ({TELEBIRR_NAME})
+- CBE Birr: {CBE_ACCOUNT} ({CBE_NAME})
+- Amount: {PRICE}
 
 If a user asks about payment or wants to unlock full access, explain the payment options and ask them to upload a screenshot after payment.
 
-If a user is not a paid member, politely explain that full department details require a one-time payment of 70 ETB.
+If a user is not a paid member, politely explain that full department details require a one-time payment of {PRICE}.
+
+If a user needs human support, direct them to contact {SUPPORT_USERNAME} on Telegram.
 
 Keep responses friendly, concise, and helpful. Use Ethiopian Birr (ETB) for all prices."""
 
@@ -52,14 +58,14 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Group check error: {e}")
         return False
 
-async def get_deepseek_response(user_message: str, is_paid: bool) -> str:
+async def get_gemini_response(user_message: str, is_paid: bool) -> str:
     try:
         context_note = ""
         if not is_paid:
-            context_note = "\n\n[Note: This user has NOT paid yet. Encourage them to pay 70 ETB for full access to detailed department information.]"
+            context_note = f"\n\n[Note: This user has NOT paid yet. Encourage them to pay {PRICE} for full access to detailed department information.]"
         
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model="gemini-2.0-flash-exp",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT + context_note},
                 {"role": "user", "content": user_message}
@@ -68,7 +74,7 @@ async def get_deepseek_response(user_message: str, is_paid: bool) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"DeepSeek API error: {e}")
+        logger.error(f"Gemini API error: {e}")
         return "Sorry, I'm having trouble right now. Please try again in a moment."
 
 # --- Handle All Text Messages ---
@@ -80,7 +86,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_paid = await is_user_in_paid_group(user_id, context)
         
         await update.message.chat.send_action(action="typing")
-        ai_response = await get_deepseek_response(user_message, is_paid)
+        ai_response = await get_gemini_response(user_message, is_paid)
         await update.message.reply_text(ai_response)
     except Exception as e:
         logger.error(f"Message handling error: {e}")
@@ -154,7 +160,8 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=user_id,
             text=f"✅ Your payment has been verified!\n\n"
                  f"🔗 Join the paid group here (one-time use):\n{invite_link.invite_link}\n\n"
-                 f"After joining, you can ask me anything about any department!"
+                 f"After joining, you can ask me anything about any department!\n\n"
+                 f"Need help? Contact {SUPPORT_USERNAME}"
         )
 
         await query.edit_message_caption(
@@ -180,7 +187,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
 
-    logger.info("Starting AI assistant...")
+    logger.info("Starting AI assistant with Gemini...")
     app.run_polling()
 
 if __name__ == "__main__":
