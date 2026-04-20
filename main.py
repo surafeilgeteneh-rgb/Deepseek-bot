@@ -1,13 +1,16 @@
 import os
 import logging
 import aiohttp
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 # --- Configuration ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PAID_GROUP_ID = os.environ.get("PAID_GROUP_ID")
-ADMIN_CHANNEL_ID = os.environ.get("ADMIN_CHANNEL_ID")
+
+# Your personal Telegram ID for receiving payment proofs
+ADMIN_USER_ID = 8228561129
 
 # Payment details
 TELEBIRR_NUMBER = "0932223736"
@@ -57,42 +60,61 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
         return False
 
 async def get_gemini_response(user_message: str, is_paid: bool) -> str:
-    try:
-        context_note = ""
-        if not is_paid:
-            context_note = f"\n\n[Note: This user has NOT paid yet. Encourage them to pay {PRICE} for full access to detailed department information.]"
-        
-        payload = {
-            "contents": [{
-                "parts": [{
-                    "text": f"{SYSTEM_PROMPT}\n\n{context_note}\n\nStudent question: {user_message}"
-                }]
-            }],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 500
+    max_retries = 3
+    base_delay = 5
+
+    for attempt in range(max_retries):
+        try:
+            context_note = ""
+            if not is_paid:
+                context_note = f"\n\n[Note: This user has NOT paid yet. Encourage them to pay {PRICE} for full access.]"
+            
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": f"{SYSTEM_PROMPT}\n\n{context_note}\n\nStudent question: {user_message}"
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 500
+                }
             }
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-                json=payload
-            ) as resp:
-                data = await resp.json()
-                
-                if "candidates" in data and len(data["candidates"]) > 0:
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
-                elif "error" in data:
-                    logger.error(f"Gemini API error: {data['error']}")
-                    return f"API Error: {data['error']['message']}"
-                else:
-                    logger.error(f"Unexpected Gemini response: {data}")
-                    return "Sorry, I received an unexpected response. Please try again."
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    data = await resp.json()
                     
-    except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        return "Sorry, I'm having trouble right now. Please try again in a moment."
+                    if "candidates" in data and len(data["candidates"]) > 0:
+                        return data["candidates"][0]["content"]["parts"][0]["text"]
+                    elif "error" in data:
+                        error_msg = data['error']['message']
+                        if "high demand" in error_msg.lower() or "exhausted" in error_msg.lower():
+                            if attempt < max_retries - 1:
+                                wait_time = base_delay * (2 ** attempt)
+                                logger.warning(f"Rate limit hit. Retrying in {wait_time}s...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                        return f"API Error: {error_msg}"
+                    else:
+                        logger.error(f"Unexpected Gemini response: {data}")
+                        return "Sorry, I received an unexpected response. Please try again."
+                        
+        except asyncio.TimeoutError:
+            logger.warning(f"Gemini API timeout. Retrying...")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(base_delay * (2 ** attempt))
+                continue
+            return "The AI service is taking too long. Please try again later."
+        except Exception as e:
+            logger.error(f"Gemini API error: {e}")
+            return "Sorry, I'm having trouble right now. Please try again in a moment."
+    
+    return "The AI service is currently unavailable. Please try again in a few minutes."
 
 # --- Handle All Text Messages ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,7 +135,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Message handling error: {e}")
         await update.message.reply_text("Something went wrong. Please try again.")
 
-# --- Handle Payment Screenshots ---
+# --- Handle Payment Screenshots (Sent to YOUR personal chat) ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
@@ -125,8 +147,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # Send directly to YOUR Telegram ID
         await context.bot.send_photo(
-            chat_id=ADMIN_CHANNEL_ID,
+            chat_id=ADMIN_USER_ID,
             photo=photo.file_id,
             caption=f"📸 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
             reply_markup=reply_markup,
@@ -153,7 +176,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await context.bot.send_document(
-            chat_id=ADMIN_CHANNEL_ID,
+            chat_id=ADMIN_USER_ID,
             document=document.file_id,
             caption=f"📎 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
             reply_markup=reply_markup,
@@ -165,7 +188,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Document handling error: {e}")
         await update.message.reply_text("Error processing file. Please try again.")
 
-# --- Admin Approve Callback ---
+# --- Admin Approve Callback (You click Approve in your personal chat) ---
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
