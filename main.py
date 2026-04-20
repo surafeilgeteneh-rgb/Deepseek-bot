@@ -55,7 +55,6 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Group check error: {e}")
         return False
-
 async def get_gemini_response(user_message: str, is_paid: bool) -> str:
     try:
         context_note = ""
@@ -74,6 +73,30 @@ async def get_gemini_response(user_message: str, is_paid: bool) -> str:
             }
         }
         
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                json=payload
+            ) as resp:
+                data = await resp.json()
+                
+                # Log the full response for debugging
+                logger.info(f"Gemini response: {data}")
+                
+                # Try different response formats
+                if "candidates" in data and len(data["candidates"]) > 0:
+                    candidate = data["candidates"][0]
+                    if "content" in candidate:
+                        return candidate["content"]["parts"][0]["text"]
+                    elif "output" in candidate:
+                        return candidate["output"]
+                
+                # If we get here, something unexpected happened
+                return f"Debug - API Response: {str(data)[:200]}"
+                    
+    except Exception as e:
+        logger.error(f"Gemini API error: {e}")
+        return f"Error: {str(e)}"        
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{GEMINI_URL}?key={GEMINI_API_KEY}",
