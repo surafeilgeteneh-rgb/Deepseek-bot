@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
 Campus Department Guide Bot
-Production-ready Telegram bot with Gemini AI, payment handling, and robust error recovery.
+Uses OpenRouter API (free models) for AI responses.
+Includes payment proof handling, admin approval, and paid group management.
 """
 
 import os
 import logging
 import asyncio
-import json
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Tuple
-from collections import defaultdict
+from typing import Optional, Tuple
 
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,16 +18,21 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes, Cal
 from telegram.error import TelegramError, Forbidden, BadRequest
 
 # -----------------------------------------------------------------------------
-# Configuration (All sensitive data via environment variables)
+# Configuration (Set via environment variables)
 # -----------------------------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PAID_GROUP_ID = os.environ.get("PAID_GROUP_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# Constants
-ADMIN_USER_ID = 8228561129                      # Your Telegram ID
-GEMINI_MODEL = "gemini-2.5-flash"               # Stable model
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+# Admin Telegram ID (receives payment proofs)
+ADMIN_USER_ID = 8228561129
+
+# OpenRouter settings
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Free model – you can change to any free model listed at https://openrouter.ai/models?max_price=0
+MODEL = "google/gemini-2.0-flash-exp:free"
+# Fallback model if primary fails
+FALLBACK_MODEL = "deepseek/deepseek-r1:free"
 
 # Payment details
 TELEBIRR_NUMBER = "0932223736"
@@ -38,10 +42,10 @@ CBE_NAME = "Banch"
 PRICE = "70 ETB"
 SUPPORT_USERNAME = "@Enha127"
 
-# Rate limiting & retry settings
-GEMINI_MAX_RETRIES = 5
-GEMINI_BASE_DELAY = 2.0          # seconds, will be multiplied exponentially
-GEMINI_TIMEOUT = aiohttp.ClientTimeout(total=45)
+# Retry settings
+MAX_RETRIES = 5
+BASE_DELAY = 2.0
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=45)
 
 # Logging
 logging.basicConfig(
@@ -51,177 +55,129 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# Enhanced System Prompt – Strict Purpose & Boundaries
+# Strict System Prompt – Defines Bot's Purpose & Boundaries
 # -----------------------------------------------------------------------------
-SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant with a SINGLE PURPOSE: helping Ethiopian university students choose the right department and career path.
+SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant dedicated exclusively to helping Ethiopian university students choose the right department and career path.
 
 **YOUR STRICT RULES:**
-1. You ONLY answer questions about:
+1. ONLY answer questions about:
    - Ethiopian university departments (e.g., Computer Science, Civil Engineering, Accounting, Nursing, Law, etc.)
    - Job outlook, salary ranges, AI risk, and career paths in Ethiopia.
    - Payment and access to detailed reports.
-2. If a user asks about ANY other topic (politics, religion, entertainment, personal advice, general knowledge, etc.), respond ONLY with:
+2. If asked about ANY other topic, respond ONLY with:
    "I'm sorry, but my purpose is strictly to help Ethiopian students with university department and career guidance. I cannot answer questions outside this scope."
-3. Never invent or guess specific data you don't have. Use the knowledge provided below, and if unsure, say "I don't have that exact figure, but I can give you a general range."
-
-**YOUR KNOWLEDGE BASE:**
-Here are details for popular departments. Use this data actively.
-
-1. **Computer Science (Addis Ababa University)**
-   - Field: Natural Sciences / Technology
-   - Job Outlook: **Very High** (fintech, telecom, AI startups)
-   - Salary Range: 8,000 – 45,000 ETB/month (entry to senior)
-   - AI Risk: **Low** (AI creates more jobs in this field)
-   - Masters Pathways: AAU, Germany (DAAD), India (ICT)
-   - NGO Relevance: Medium (data analysis roles)
-
-2. **Civil Engineering (Addis Ababa Science & Technology University)**
-   - Field: Engineering
-   - Job Outlook: **High** (construction, government infrastructure)
-   - Salary Range: 7,000 – 40,000 ETB/month
-   - AI Risk: **Very Low** (physical presence required)
-   - Masters Pathways: AAU, China Scholarship Council, Turkey
-   - NGO Relevance: High (infrastructure projects)
-
-3. **Accounting (Unity University)**
-   - Field: Business / Finance
-   - Job Outlook: **Stable** (every company needs accountants)
-   - Salary Range: 6,000 – 35,000 ETB/month
-   - AI Risk: **Medium** (automation of bookkeeping, but advisory roles remain)
-   - Masters Pathways: ACCA, MBA local
-   - NGO Relevance: High (finance departments)
-
-4. **Nursing (Jimma University)**
-   - Field: Health Sciences
-   - Job Outlook: **Very High** (critical shortage nationwide)
-   - Salary Range: 7,000 – 30,000 ETB/month (plus allowances)
-   - AI Risk: **Very Low** (human care essential)
-   - Masters Pathways: AAU, specialty certifications abroad
-   - NGO Relevance: Very High (hospitals, clinics)
-
-5. **Law (Haramaya University)**
-   - Field: Social Sciences
-   - Job Outlook: **Moderate** (competitive, but growing corporate sector)
-   - Salary Range: 6,000 – 50,000+ ETB (depending on firm)
-   - AI Risk: **Low** (legal reasoning still human-led)
-   - Masters Pathways: LLM abroad (UK, South Africa)
-   - NGO Relevance: High (human rights, advocacy)
+3. Never invent specific data you don't have. Provide general, helpful overviews based on your knowledge of Ethiopian higher education.
 
 **FREE vs PAID ACCESS:**
 - Free users receive general overviews and encouragement to pay for full details.
-- Paid users (members of the exclusive group) get **complete, in-depth reports** including employer lists, 5-year projections, and personalised advice.
-- Payment: {PRICE} one‑time via **Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME})** or **CBE Birr {CBE_ACCOUNT} ({CBE_NAME})**. After payment, upload screenshot here for instant verification.
+- Paid users (members of our exclusive group) get access to **in-depth reports** including employer lists, 5‑year projections, and personalized advice.
+- Payment: {PRICE} one‑time via **Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME})** or **CBE Birr {CBE_ACCOUNT} ({CBE_NAME})**. After payment, upload screenshot here.
 
 **RESPONSE STYLE:**
-- Friendly, professional, concise (under 250 words unless detailed report requested).
+- Friendly, professional, concise (under 250 words).
 - Always remind free users they can unlock full details with the one‑time payment.
-- If a student needs human support, direct them to {SUPPORT_USERNAME}.
+- If human support is needed, direct to {SUPPORT_USERNAME}.
 """
 
 # -----------------------------------------------------------------------------
-# In-Memory Cache for Approval State (to prevent double-approvals)
-# -----------------------------------------------------------------------------
-approval_cache: Dict[int, float] = {}          # user_id -> timestamp of approval
-APPROVAL_CACHE_TTL = 3600                      # 1 hour
-
-# -----------------------------------------------------------------------------
-# Helper: Check if user is in paid group (with retry)
+# Helper: Check if user is in paid group
 # -----------------------------------------------------------------------------
 async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not PAID_GROUP_ID:
-        logger.error("PAID_GROUP_ID not set")
         return False
     try:
         member = await context.bot.get_chat_member(chat_id=PAID_GROUP_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except TelegramError as e:
+    except Exception as e:
         logger.warning(f"Group check failed for {user_id}: {e}")
         return False
-    except Exception as e:
-        logger.error(f"Unexpected group check error: {e}")
-        return False
 
 # -----------------------------------------------------------------------------
-# Robust Gemini API Call with Exponential Backoff & Rate-Limit Handling
+# OpenRouter API Call with Retry & Fallback
 # -----------------------------------------------------------------------------
-async def call_gemini_api(prompt_text: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Calls Gemini API with retry logic.
-    Returns (response_text, error_message). One will be None.
-    """
-    if not GEMINI_API_KEY:
-        return None, "API key not configured."
+async def call_openrouter(prompt_text: str, use_fallback: bool = False) -> Tuple[Optional[str], Optional[str]]:
+    """Calls OpenRouter API. Returns (response_text, error_message)."""
+    if not OPENROUTER_API_KEY:
+        return None, "OpenRouter API key not configured."
 
+    model = FALLBACK_MODEL if use_fallback else MODEL
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "https://campus-dept-guide.railway.app",
+        "X-Title": "Campus Department Guide Bot",
+        "Content-Type": "application/json"
+    }
     payload = {
-        "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 600,
-            "topP": 0.9
-        }
+        "model": model,
+        "messages": [{"role": "user", "content": prompt_text}],
+        "temperature": 0.7,
+        "max_tokens": 600
     }
 
-    for attempt in range(GEMINI_MAX_RETRIES):
+    for attempt in range(MAX_RETRIES):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-                    json=payload,
-                    timeout=GEMINI_TIMEOUT
+                    OPENROUTER_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT
                 ) as resp:
                     data = await resp.json()
 
-                    if "candidates" in data:
-                        return data["candidates"][0]["content"]["parts"][0]["text"], None
+                    if "choices" in data:
+                        return data["choices"][0]["message"]["content"], None
 
                     elif "error" in data:
-                        error_msg = data["error"]["message"].lower()
-                        # Rate limit or overload -> retry
-                        if any(kw in error_msg for kw in ["high demand", "exhausted", "rate limit", "quota"]):
-                            if attempt < GEMINI_MAX_RETRIES - 1:
-                                wait = GEMINI_BASE_DELAY * (2 ** attempt)
-                                logger.warning(f"Gemini rate limit. Retry {attempt+1}/{GEMINI_MAX_RETRIES} after {wait:.1f}s")
+                        err = data["error"].get("message", str(data["error"])).lower()
+                        # Rate limit or temporary issue -> retry
+                        if any(kw in err for kw in ["rate", "limit", "overloaded", "capacity", "high demand"]):
+                            if attempt < MAX_RETRIES - 1:
+                                wait = BASE_DELAY * (2 ** attempt)
+                                logger.warning(f"OpenRouter rate limit. Retry {attempt+1}/{MAX_RETRIES} in {wait:.1f}s")
                                 await asyncio.sleep(wait)
                                 continue
-                        return None, data["error"]["message"]
+                        return None, data["error"].get("message", "Unknown API error")
                     else:
-                        logger.error(f"Unknown Gemini response: {data}")
+                        logger.error(f"Unexpected OpenRouter response: {data}")
                         return None, "Unexpected API response structure."
 
         except asyncio.TimeoutError:
-            logger.warning(f"Gemini timeout (attempt {attempt+1})")
-            if attempt < GEMINI_MAX_RETRIES - 1:
-                await asyncio.sleep(GEMINI_BASE_DELAY * (2 ** attempt))
+            logger.warning(f"Timeout (attempt {attempt+1})")
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(BASE_DELAY * (2 ** attempt))
                 continue
-            return None, "Request timed out after multiple attempts."
+            return None, "Request timed out."
         except Exception as e:
-            logger.error(f"Gemini exception: {e}")
+            logger.error(f"Exception: {e}")
             return None, str(e)
 
     return None, "Max retries exceeded."
 
-async def get_gemini_response(user_message: str, is_paid: bool) -> str:
-    """Wrapper that builds the prompt and handles errors gracefully."""
+async def get_ai_response(user_message: str, is_paid: bool) -> str:
+    """Builds prompt and calls AI with fallback logic."""
     context_note = ""
     if not is_paid:
-        context_note = f"\n\n[User has NOT paid. Politely encourage the one-time payment of {PRICE} for full details.]"
+        context_note = f"\n\n[User has NOT paid. Politely encourage the one‑time payment of {PRICE} for full details.]"
 
     full_prompt = f"{SYSTEM_PROMPT}\n\n{context_note}\n\nStudent: {user_message}\nCampus Guide:"
 
-    response, error = await call_gemini_api(full_prompt)
+    # Try primary model
+    response, error = await call_openrouter(full_prompt)
     if response:
         return response
-    else:
-        logger.error(f"Gemini failure: {error}")
-        if "high demand" in (error or "").lower():
-            return "🤖 I'm experiencing high traffic right now. Please give me a moment and try again."
-        elif "quota" in (error or "").lower():
-            return "🔧 The service is temporarily unavailable. Our team has been notified."
-        else:
-            return f"⚠️ I'm having trouble connecting to my knowledge base. Please try again later."
+
+    # If primary fails, try fallback model
+    logger.warning(f"Primary model failed: {error}. Trying fallback...")
+    response, error = await call_openrouter(full_prompt, use_fallback=True)
+    if response:
+        return response
+
+    # Both failed
+    logger.error(f"All models failed. Last error: {error}")
+    if "rate" in str(error).lower() or "limit" in str(error).lower():
+        return "🤖 I'm experiencing high traffic. Please try again in a few minutes."
+    return "⚠️ I'm temporarily unavailable. Please try again later."
 
 # -----------------------------------------------------------------------------
-# Message Handler with Typing Indicator & Logging
+# Message Handler
 # -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -230,24 +186,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Message from @{user.username or user_id}: {user_message[:100]}")
 
-    # Check payment status
     is_paid = await is_user_in_paid_group(user_id, context)
-    logger.info(f"User {user_id} paid={is_paid}")
-
-    # Send typing indicator
     await update.message.chat.send_action(action="typing")
-
-    # Get AI response
-    ai_response = await get_gemini_response(user_message, is_paid)
+    ai_response = await get_ai_response(user_message, is_paid)
     await update.message.reply_text(ai_response)
 
 # -----------------------------------------------------------------------------
-# Payment Proof Handlers (Forward to Admin with Inline Approval)
+# Payment Proof Handlers (Forward to Admin)
 # -----------------------------------------------------------------------------
 async def send_approval_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: int,
-                                 username: str, file_id: str, is_photo: bool = True,
-                                 caption: str = ""):
-    """Send approval message to admin with inline button."""
+                                 username: str, file_id: str, is_photo: bool, caption: str):
     keyboard = [[InlineKeyboardButton(
         f"✅ Approve @{username or user_id}",
         callback_data=f"approve_{user_id}"
@@ -257,146 +205,106 @@ async def send_approval_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: in
     try:
         if is_photo:
             await context.bot.send_photo(
-                chat_id=ADMIN_USER_ID,
-                photo=file_id,
-                caption=caption,
-                reply_markup=reply_markup
+                chat_id=ADMIN_USER_ID, photo=file_id, caption=caption, reply_markup=reply_markup
             )
         else:
             await context.bot.send_document(
-                chat_id=ADMIN_USER_ID,
-                document=file_id,
-                caption=caption,
-                reply_markup=reply_markup
+                chat_id=ADMIN_USER_ID, document=file_id, caption=caption, reply_markup=reply_markup
             )
-        logger.info(f"Payment proof forwarded to admin for user {user_id}")
+        logger.info(f"Payment proof forwarded for user {user_id}")
     except TelegramError as e:
-        logger.error(f"Failed to send approval request to admin: {e}")
+        logger.error(f"Failed to send to admin: {e}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    photo = update.message.photo[-1]  # highest resolution
-
+    photo = update.message.photo[-1]
     caption = f"📸 Payment proof from @{user.username or user.id} (ID: {user.id})"
     await send_approval_keyboard(context, user.id, user.username or "", photo.file_id, True, caption)
-
-    await update.message.reply_text(
-        "✅ Payment screenshot received! We'll verify and send you the access link shortly."
-    )
+    await update.message.reply_text("✅ Payment screenshot received! You'll get access shortly.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    document = update.message.document
-
+    doc = update.message.document
     caption = f"📎 Payment document from @{user.username or user.id} (ID: {user.id})"
-    await send_approval_keyboard(context, user.id, user.username or "", document.file_id, False, caption)
-
-    await update.message.reply_text(
-        "✅ Document received! You'll get the invite link after verification."
-    )
+    await send_approval_keyboard(context, user.id, user.username or "", doc.file_id, False, caption)
+    await update.message.reply_text("✅ Document received! You'll get access shortly.")
 
 # -----------------------------------------------------------------------------
-# Approval Callback (Admin clicks "Approve")
+# Admin Approval Callback
 # -----------------------------------------------------------------------------
+approval_cache = {}  # user_id -> timestamp
+
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Extract user_id from callback data
     try:
         user_id = int(query.data.replace("approve_", ""))
     except ValueError:
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Invalid user ID.")
         return
 
-    # Prevent duplicate approvals within short time
+    # Prevent duplicate approvals within 1 hour
     now = time.time()
-    if user_id in approval_cache and (now - approval_cache[user_id]) < APPROVAL_CACHE_TTL:
+    if user_id in approval_cache and (now - approval_cache[user_id]) < 3600:
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n⚠️ Already approved recently.")
         return
     approval_cache[user_id] = now
 
-    # Verify user exists and can be messaged
+    # Check if we can message the user
     try:
-        # Attempt to send a test message to ensure chat is available
         await context.bot.send_chat_action(chat_id=user_id, action="typing")
     except Forbidden:
-        await query.edit_message_caption(
-            caption=f"{query.message.caption}\n\n❌ Cannot message this user. They may have blocked the bot."
-        )
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ User blocked the bot.")
         return
     except BadRequest as e:
         if "chat not found" in str(e).lower():
-            await query.edit_message_caption(
-                caption=f"{query.message.caption}\n\n❌ Chat not found. User must start a conversation with the bot first."
-            )
+            await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ User must start a chat with the bot first.")
             return
-        else:
-            logger.error(f"BadRequest during user check: {e}")
 
     # Create one-time invite link
     try:
         invite_link = await context.bot.create_chat_invite_link(
-            chat_id=PAID_GROUP_ID,
-            member_limit=1,
-            expire_date=datetime.utcnow() + timedelta(hours=24)  # link valid 24h
+            chat_id=PAID_GROUP_ID, member_limit=1, expire_date=datetime.utcnow() + timedelta(hours=24)
         )
     except TelegramError as e:
-        logger.error(f"Failed to create invite link: {e}")
+        logger.error(f"Invite link error: {e}")
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Could not create invite link. Check bot permissions.")
         return
 
-    # Send invite link to the user
+    # Send invite to user
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=(
-                f"✅ Your payment has been verified!\n\n"
-                f"🔗 Join the exclusive paid group here (one-time link):\n{invite_link.invite_link}\n\n"
-                f"After joining, you can ask me detailed questions about any department.\n\n"
-                f"Need help? Contact {SUPPORT_USERNAME}"
-            )
+            text=f"✅ Payment verified!\n\n🔗 Join the paid group here (one‑time link):\n{invite_link.invite_link}\n\nAfter joining, you can ask detailed questions.\n\nNeed help? {SUPPORT_USERNAME}"
         )
-        logger.info(f"Approved user {user_id}, invite sent.")
+        logger.info(f"Invite sent to user {user_id}")
     except TelegramError as e:
-        logger.error(f"Could not send invite to user {user_id}: {e}")
-        await query.edit_message_caption(
-            caption=f"{query.message.caption}\n\n❌ Failed to send invite: {e}"
-        )
+        logger.error(f"Could not send invite: {e}")
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Failed to send invite: {e}")
         return
 
-    # Update the admin message
-    await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APPROVED - Invite sent.")
+    await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APPROVED – Invite sent.")
 
 # -----------------------------------------------------------------------------
-# Error Handler for Telegram API errors
-# -----------------------------------------------------------------------------
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(msg="Exception while handling an update:", exc_info=context.error)
-
-# -----------------------------------------------------------------------------
-# Main Entry Point
+# Main
 # -----------------------------------------------------------------------------
 def main():
     if not TELEGRAM_TOKEN:
-        logger.critical("TELEGRAM_BOT_TOKEN is missing.")
+        logger.critical("TELEGRAM_BOT_TOKEN missing")
         return
     if not PAID_GROUP_ID:
-        logger.warning("PAID_GROUP_ID not set. Paid checks will fail.")
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set. AI responses disabled.")
+        logger.warning("PAID_GROUP_ID not set")
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY not set – AI disabled")
 
-    # Create Application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # Handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
-    app.add_error_handler(error_handler)
 
-    logger.info("Bot started. Polling...")
+    logger.info("Bot started with OpenRouter AI.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
