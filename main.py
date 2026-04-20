@@ -1,15 +1,15 @@
 import os
 import logging
+import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from openai import OpenAI
 
 # --- Configuration ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PAID_GROUP_ID = os.environ.get("PAID_GROUP_ID")
 ADMIN_CHANNEL_ID = os.environ.get("ADMIN_CHANNEL_ID")
 
-# Payment details - UPDATED
+# Payment details
 TELEBIRR_NUMBER = "0932223736"
 TELEBIRR_NAME = "Banch"
 CBE_ACCOUNT = "1000748634456"
@@ -17,14 +17,12 @@ CBE_NAME = "Banch"
 PRICE = "70 ETB"
 SUPPORT_USERNAME = "@Enha127"
 
+# Gemini API
+GEMINI_API_KEY = "AIzaSyBk7-6IjVwt5ISVrOS-2MOKKpxwGjC0B2I"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Gemini client - FREE
-client = OpenAI(
-    api_key="AIzaSyBk7-6IjVwt5ISVrOS-2MOKKpxwGjC0B2I",
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-)
 
 # System prompt for AI
 SYSTEM_PROMPT = f"""You are a helpful assistant for Ethiopian university students. Your name is Campus Guide.
@@ -64,15 +62,31 @@ async def get_gemini_response(user_message: str, is_paid: bool) -> str:
         if not is_paid:
             context_note = f"\n\n[Note: This user has NOT paid yet. Encourage them to pay {PRICE} for full access to detailed department information.]"
         
-        response = client.chat.completions.create(
-            model="gemini-2.0-flash-exp",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT + context_note},
-                {"role": "user", "content": user_message}
-            ],
-            stream=False
-        )
-        return response.choices[0].message.content
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": f"{SYSTEM_PROMPT}\n\n{context_note}\n\nStudent question: {user_message}"
+                }]
+            }],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 500
+            }
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                json=payload
+            ) as resp:
+                data = await resp.json()
+                
+                if "candidates" in data and len(data["candidates"]) > 0:
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                else:
+                    logger.error(f"Gemini API unexpected response: {data}")
+                    return "Sorry, I received an unexpected response. Please try again."
+                    
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
         return "Sorry, I'm having trouble right now. Please try again in a moment."
@@ -83,11 +97,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         user_message = update.message.text
         
+        logger.info(f"Received message from {user_id}: {user_message[:50]}...")
+        
         is_paid = await is_user_in_paid_group(user_id, context)
+        logger.info(f"User {user_id} paid status: {is_paid}")
         
         await update.message.chat.send_action(action="typing")
         ai_response = await get_gemini_response(user_message, is_paid)
         await update.message.reply_text(ai_response)
+        
     except Exception as e:
         logger.error(f"Message handling error: {e}")
         await update.message.reply_text("Something went wrong. Please try again.")
@@ -187,7 +205,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
 
-    logger.info("Starting AI assistant with Gemini...")
+    logger.info("Starting AI assistant with Gemini REST API...")
     app.run_polling()
 
 if __name__ == "__main__":
