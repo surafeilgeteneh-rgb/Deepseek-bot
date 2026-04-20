@@ -21,7 +21,7 @@ PRICE = "70 ETB"
 SUPPORT_USERNAME = "@Enha127"
 
 # Gemini API
-GEMINI_API_KEY = "AIzaSyDjWcbbcdVb4c6PlSKnWwycIX3z8-0Ntxg"
+GEMINI_API_KEY = "AIzaSyAVZNeGE243-FEJ7399cvAe8Etcp3RXR_k"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
