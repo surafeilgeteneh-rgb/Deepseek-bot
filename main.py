@@ -11,6 +11,9 @@ ADMIN_CHANNEL_ID = os.environ.get("ADMIN_CHANNEL_ID")
 
 PORT = int(os.environ.get("PORT", 8080))
 
+# Your Railway domain
+RAILWAY_DOMAIN = "deepseek-bot-production.up.railway.app"
+
 # Payment details
 CBE_ACCOUNT = "1000647705808"
 CBE_NAME = "Yosef"
@@ -208,11 +211,11 @@ def main():
 
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
 
-    logger.info("Starting webhook...")
+    logger.info(f"Starting webhook on port {PORT}...")
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN')}/webhook"
+        webhook_url=f"https://{RAILWAY_DOMAIN}/webhook"
     )
 
 if __name__ == "__main__":
