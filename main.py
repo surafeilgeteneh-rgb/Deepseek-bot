@@ -14,7 +14,7 @@ CBE_ACCOUNT = "1000647705808"
 CBE_NAME = "Yosef"
 TELEBIRR_NUMBER = "0967523107"
 TELEBIRR_NAME = "Yosef"
-PRICE = "200 ETB"
+PRICE = "70 ETB"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,16 +28,16 @@ SYSTEM_PROMPT = """You are a helpful assistant for Ethiopian university students
 Your purpose:
 - Help students choose the right university department
 - Provide information about job outlook, salary ranges, AI risk, and career paths
-- Guide students on how to pay for full access (200 ETB via CBE or Telebirr)
+- Guide students on how to pay for full access (70 ETB via CBE or Telebirr)
 
 Payment information:
 - CBE Birr: 1000647705808 (Yosef)
 - Telebirr: 0967523107 (Yosef)
-- Amount: 200 ETB
+- Amount: 70 ETB
 
 If a user asks about payment or wants to unlock full access, explain the payment options and ask them to upload a screenshot after payment.
 
-If a user is not a paid member, politely explain that full department details require a one-time payment of 200 ETB.
+If a user is not a paid member, politely explain that full department details require a one-time payment of 70 ETB.
 
 Keep responses friendly, concise, and helpful. Use Ethiopian Birr (ETB) for all prices."""
 
@@ -48,15 +48,15 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
     try:
         member = await context.bot.get_chat_member(chat_id=PAID_GROUP_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except:
+    except Exception as e:
+        logger.error(f"Group check error: {e}")
         return False
 
 async def get_deepseek_response(user_message: str, is_paid: bool) -> str:
     try:
-        # Add payment status to context
         context_note = ""
         if not is_paid:
-            context_note = "\n\n[Note: This user has NOT paid yet. Encourage them to pay 200 ETB for full access to detailed department information.]"
+            context_note = "\n\n[Note: This user has NOT paid yet. Encourage them to pay 70 ETB for full access to detailed department information.]"
         
         response = client.chat.completions.create(
             model="deepseek-chat",
@@ -71,73 +71,80 @@ async def get_deepseek_response(user_message: str, is_paid: bool) -> str:
         logger.error(f"DeepSeek API error: {e}")
         return "Sorry, I'm having trouble right now. Please try again in a moment."
 
-# --- Handle All Text Messages (AI Response) ---
+# --- Handle All Text Messages ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_message = update.message.text
-    
-    # Check payment status
-    is_paid = await is_user_in_paid_group(user_id, context)
-    
-    # Show typing indicator
-    await update.message.chat.send_action(action="typing")
-    
-    # Get AI response
-    ai_response = await get_deepseek_response(user_message, is_paid)
-    await update.message.reply_text(ai_response)
+    try:
+        user_id = update.effective_user.id
+        user_message = update.message.text
+        
+        is_paid = await is_user_in_paid_group(user_id, context)
+        
+        await update.message.chat.send_action(action="typing")
+        ai_response = await get_deepseek_response(user_message, is_paid)
+        await update.message.reply_text(ai_response)
+    except Exception as e:
+        logger.error(f"Message handling error: {e}")
+        await update.message.reply_text("Something went wrong. Please try again.")
 
 # --- Handle Payment Screenshots ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    photo = update.message.photo[-1]
+    try:
+        user = update.effective_user
+        photo = update.message.photo[-1]
 
-    keyboard = [[InlineKeyboardButton(
-        f"✅ Approve @{user.username or user.id}", 
-        callback_data=f"approve_{user.id}"
-    )]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = [[InlineKeyboardButton(
+            f"✅ Approve @{user.username or user.id}", 
+            callback_data=f"approve_{user.id}"
+        )]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.send_photo(
-        chat_id=ADMIN_CHANNEL_ID,
-        photo=photo.file_id,
-        caption=f"📸 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+        await context.bot.send_photo(
+            chat_id=ADMIN_CHANNEL_ID,
+            photo=photo.file_id,
+            caption=f"📸 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
-    await update.message.reply_text(
-        "✅ Payment screenshot received!\n"
-        "You will be added to the paid group within 1 hour after verification."
-    )
+        await update.message.reply_text(
+            "✅ Payment screenshot received!\n"
+            "You will be added to the paid group within 1 hour after verification."
+        )
+    except Exception as e:
+        logger.error(f"Photo handling error: {e}")
+        await update.message.reply_text("Error processing image. Please try again.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    document = update.message.document
+    try:
+        user = update.effective_user
+        document = update.message.document
 
-    keyboard = [[InlineKeyboardButton(
-        f"✅ Approve @{user.username or user.id}", 
-        callback_data=f"approve_{user.id}"
-    )]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = [[InlineKeyboardButton(
+            f"✅ Approve @{user.username or user.id}", 
+            callback_data=f"approve_{user.id}"
+        )]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.send_document(
-        chat_id=ADMIN_CHANNEL_ID,
-        document=document.file_id,
-        caption=f"📎 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+        await context.bot.send_document(
+            chat_id=ADMIN_CHANNEL_ID,
+            document=document.file_id,
+            caption=f"📎 Payment proof from @{user.username or user.id}\nUser ID: `{user.id}`",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
-    await update.message.reply_text("✅ Payment document received! You will be added within 1 hour.")
+        await update.message.reply_text("✅ Payment document received! You will be added within 1 hour.")
+    except Exception as e:
+        logger.error(f"Document handling error: {e}")
+        await update.message.reply_text("Error processing file. Please try again.")
 
 # --- Admin Approve Callback ---
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user_id = int(query.data.replace("approve_", ""))
-
     try:
+        user_id = int(query.data.replace("approve_", ""))
         invite_link = await context.bot.create_chat_invite_link(
             chat_id=PAID_GROUP_ID,
             member_limit=1
@@ -155,6 +162,7 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception as e:
+        logger.error(f"Approve callback error: {e}")
         await query.edit_message_caption(
             caption=f"{query.message.caption}\n\n❌ Error: {e}"
         )
@@ -167,7 +175,6 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Only message handlers - NO commands
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
