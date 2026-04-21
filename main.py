@@ -32,8 +32,8 @@ ADMIN_USER_ID = 8228561129
 # OpenRouter settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
-MODEL =  "deepseek/deepseek-r1:free"
-FALLBACK_MODEL = "deepseek/deepseek-r1:free"
+MODEL = "deepseek/deepseek-r1:free"
+FALLBACK_MODEL = "meta-llama/llama-3.2-3b-instruct:free"
 
 # Payment details
 TELEBIRR_NUMBER = "0932223736"
@@ -56,7 +56,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize Supabase
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info("Supabase connected")
+else:
+    supabase = None
+    logger.warning("Supabase not configured")
 
 # -----------------------------------------------------------------------------
 # System Prompt
@@ -82,11 +87,13 @@ Support: {SUPPORT_USERNAME}
 # -----------------------------------------------------------------------------
 async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not PAID_GROUP_ID:
+        logger.warning("PAID_GROUP_ID not set")
         return False
     try:
         member = await context.bot.get_chat_member(chat_id=PAID_GROUP_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except:
+    except Exception as e:
+        logger.error(f"Group check error: {e}")
         return False
 
 # -----------------------------------------------------------------------------
@@ -94,6 +101,9 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
 # -----------------------------------------------------------------------------
 async def get_embedding(text: str) -> Optional[list]:
     """Get embedding vector for text via OpenRouter."""
+    if not OPENROUTER_API_KEY:
+        logger.error("OPENROUTER_API_KEY not set")
+        return None
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -106,20 +116,27 @@ async def get_embedding(text: str) -> Optional[list]:
         async with aiohttp.ClientSession() as session:
             async with session.post(EMBEDDINGS_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT) as resp:
                 data = await resp.json()
-                return data["data"][0]["embedding"]
+                logger.info(f"Embedding response: {data}")
+                if "data" in data:
+                    return data["data"][0]["embedding"]
+                else:
+                    logger.error(f"Embedding error: {data}")
+                    return None
     except Exception as e:
-        logger.error(f"Embedding error: {e}")
+        logger.error(f"Embedding exception: {e}")
         return None
 
 def search_documents(query_embedding: list, match_count: int = 3) -> list:
     """Search Supabase for similar document chunks."""
     if not supabase:
+        logger.warning("Supabase not available")
         return []
     try:
         result = supabase.rpc(
             "match_documents",
             {"query_embedding": query_embedding, "match_count": match_count}
         ).execute()
+        logger.info(f"Found {len(result.data or [])} documents")
         return result.data or []
     except Exception as e:
         logger.error(f"Search error: {e}")
@@ -130,6 +147,10 @@ def search_documents(query_embedding: list, match_count: int = 3) -> list:
 # -----------------------------------------------------------------------------
 async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """Call OpenRouter chat API."""
+    if not OPENROUTER_API_KEY:
+        logger.error("OPENROUTER_API_KEY not set")
+        return None, "API key missing"
+
     model = FALLBACK_MODEL if use_fallback else MODEL
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -144,41 +165,59 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
         "max_tokens": 600
     }
 
+    logger.info(f"Calling OpenRouter with model: {model}")
+
     for attempt in range(MAX_RETRIES):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(OPENROUTER_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT) as resp:
                     data = await resp.json()
                     logger.info(f"OpenRouter response: {data}")
+
                     if "choices" in data:
                         return data["choices"][0]["message"]["content"], None
                     elif "error" in data:
-                        err = data["error"].get("message", "").lower()
-                        if any(kw in err for kw in ["rate", "limit", "overloaded"]):
+                        err = data["error"].get("message", str(data["error"])).lower()
+                        logger.error(f"OpenRouter error: {err}")
+                        if any(kw in err for kw in ["rate", "limit", "overloaded", "capacity"]):
                             if attempt < MAX_RETRIES - 1:
-                                await asyncio.sleep(BASE_DELAY * (2 ** attempt))
+                                wait = BASE_DELAY * (2 ** attempt)
+                                logger.warning(f"Rate limited. Retry {attempt+1}/{MAX_RETRIES} in {wait}s")
+                                await asyncio.sleep(wait)
                                 continue
                         return None, data["error"].get("message", "API error")
+                    else:
+                        logger.error(f"Unexpected response: {data}")
+                        return None, "Unexpected response"
         except asyncio.TimeoutError:
+            logger.warning(f"Timeout (attempt {attempt+1})")
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(BASE_DELAY * (2 ** attempt))
                 continue
             return None, "Timeout"
         except Exception as e:
+            logger.error(f"Exception: {e}")
             return None, str(e)
+
     return None, "Max retries exceeded"
 
 async def get_ai_response(user_message: str, is_paid: bool) -> str:
     """Get AI response with RAG for paid users."""
+    logger.info(f"get_ai_response called. Paid: {is_paid}, Message: {user_message[:50]}")
+
     context_note = ""
     if not is_paid:
         context_note = f"\n\n[User has NOT paid. Encourage payment of {PRICE} for full details.]"
         full_prompt = f"{SYSTEM_PROMPT}\n\n{context_note}\n\nStudent: {user_message}\nCampus Guide:"
-        response, _ = await call_openrouter(full_prompt)
-        return response if response else "⚠️ Service unavailable. Try again later."
+        response, error = await call_openrouter(full_prompt)
+        if response:
+            return response
+        logger.error(f"AI failed for free user: {error}")
+        return "⚠️ Service unavailable. Try again later."
 
     # Paid user - try RAG
     if supabase:
+        logger.info("Attempting RAG search...")
         embedding = await get_embedding(user_message)
         if embedding:
             docs = search_documents(embedding, match_count=3)
@@ -191,14 +230,19 @@ Use this context from Ethiopian department documents to answer:
 
 Student: {user_message}
 Campus Guide (use context):"""
-                response, _ = await call_openrouter(rag_prompt)
+                response, error = await call_openrouter(rag_prompt)
                 if response:
                     return response
+                logger.warning(f"RAG AI failed: {error}")
 
     # Fallback to regular AI
+    logger.info("Falling back to regular AI...")
     full_prompt = f"{SYSTEM_PROMPT}\n\nStudent: {user_message}\nCampus Guide:"
-    response, _ = await call_openrouter(full_prompt)
-    return response if response else "⚠️ Service unavailable. Try again later."
+    response, error = await call_openrouter(full_prompt)
+    if response:
+        return response
+    logger.error(f"All AI attempts failed: {error}")
+    return "⚠️ Service unavailable. Try again later."
 
 # -----------------------------------------------------------------------------
 # Message Handler
@@ -235,6 +279,7 @@ async def send_approval_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: in
             await context.bot.send_document(
                 chat_id=ADMIN_USER_ID, document=file_id, caption=caption, reply_markup=reply_markup
             )
+        logger.info(f"Payment proof forwarded for user {user_id}")
     except TelegramError as e:
         logger.error(f"Failed to send to admin: {e}")
 
@@ -310,6 +355,7 @@ def main():
         logger.critical("TELEGRAM_BOT_TOKEN missing")
         return
 
+    logger.info(f"Starting bot with model: {MODEL}")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
