@@ -148,7 +148,8 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(OPENROUTER_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT) as resp:
-                    data = await resp.json() logger.info(f"OpenRouter response: {data}")
+                    data = await resp.json()
+                    logger.info(f"OpenRouter response: {data}")
                     if "choices" in data:
                         return data["choices"][0]["message"]["content"], None
                     elif "error" in data:
