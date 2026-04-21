@@ -32,7 +32,7 @@ ADMIN_USER_ID = 8228561129
 # OpenRouter settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
-MODEL = "google/gemini-2.0-flash-exp:free"
+MODEL = "MODEL = "deepseek/deepseek-r1:free""
 FALLBACK_MODEL = "deepseek/deepseek-r1:free"
 
 # Payment details
