@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Campus Department Guide Bot
-Uses OpenRouter API (free models) for AI responses.
-Includes payment proof handling, admin approval, and paid group management.
+Campus Department Guide Bot with RAG
+Uses OpenRouter AI + Supabase Vector Database for PDF search
 """
 
 import os
@@ -16,22 +15,24 @@ import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.error import TelegramError, Forbidden, BadRequest
+from supabase import create_client, Client
 
 # -----------------------------------------------------------------------------
-# Configuration (Set via environment variables)
+# Configuration
 # -----------------------------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 PAID_GROUP_ID = os.environ.get("PAID_GROUP_ID")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-# Admin Telegram ID (receives payment proofs)
+# Admin Telegram ID
 ADMIN_USER_ID = 8228561129
 
 # OpenRouter settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-# Free model – you can change to any free model listed at https://openrouter.ai/models?max_price=0
+EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
 MODEL = "google/gemini-2.0-flash-exp:free"
-# Fallback model if primary fails
 FALLBACK_MODEL = "deepseek/deepseek-r1:free"
 
 # Payment details
@@ -43,7 +44,7 @@ PRICE = "70 ETB"
 SUPPORT_USERNAME = "@Enha127"
 
 # Retry settings
-MAX_RETRIES = 5
+MAX_RETRIES = 3
 BASE_DELAY = 2.0
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=45)
 
@@ -54,29 +55,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Initialize Supabase
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
 # -----------------------------------------------------------------------------
-# Strict System Prompt – Defines Bot's Purpose & Boundaries
+# System Prompt
 # -----------------------------------------------------------------------------
 SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant dedicated exclusively to helping Ethiopian university students choose the right department and career path.
 
 **YOUR STRICT RULES:**
-1. ONLY answer questions about:
-   - Ethiopian university departments (e.g., Computer Science, Civil Engineering, Accounting, Nursing, Law, etc.)
-   - Job outlook, salary ranges, AI risk, and career paths in Ethiopia.
-   - Payment and access to detailed reports.
+1. ONLY answer questions about Ethiopian university departments and careers.
 2. If asked about ANY other topic, respond ONLY with:
-   "I'm sorry, but my purpose is strictly to help Ethiopian students with university department and career guidance. I cannot answer questions outside this scope."
-3. Never invent specific data you don't have. Provide general, helpful overviews based on your knowledge of Ethiopian higher education.
+   "I'm sorry, but my purpose is strictly to help Ethiopian students with university department and career guidance."
+3. Never invent data. Use provided context or give general overviews.
 
-**FREE vs PAID ACCESS:**
-- Free users receive general overviews and encouragement to pay for full details.
-- Paid users (members of our exclusive group) get access to **in-depth reports** including employer lists, 5‑year projections, and personalized advice.
-- Payment: {PRICE} one‑time via **Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME})** or **CBE Birr {CBE_ACCOUNT} ({CBE_NAME})**. After payment, upload screenshot here.
+**FREE vs PAID:**
+- Free users: General overviews, encourage payment of {PRICE}
+- Paid users: Detailed answers from uploaded department documents
 
-**RESPONSE STYLE:**
-- Friendly, professional, concise (under 250 words).
-- Always remind free users they can unlock full details with the one‑time payment.
-- If human support is needed, direct to {SUPPORT_USERNAME}.
+Payment: Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})
+Support: {SUPPORT_USERNAME}
 """
 
 # -----------------------------------------------------------------------------
@@ -88,28 +86,60 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
     try:
         member = await context.bot.get_chat_member(chat_id=PAID_GROUP_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except Exception as e:
-        logger.warning(f"Group check failed for {user_id}: {e}")
+    except:
         return False
 
 # -----------------------------------------------------------------------------
-# OpenRouter API Call with Retry & Fallback
+# RAG Functions
 # -----------------------------------------------------------------------------
-async def call_openrouter(prompt_text: str, use_fallback: bool = False) -> Tuple[Optional[str], Optional[str]]:
-    """Calls OpenRouter API. Returns (response_text, error_message)."""
-    if not OPENROUTER_API_KEY:
-        return None, "OpenRouter API key not configured."
+async def get_embedding(text: str) -> Optional[list]:
+    """Get embedding vector for text via OpenRouter."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "openai/text-embedding-3-small",
+            "input": [text]
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(EMBEDDINGS_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT) as resp:
+                data = await resp.json()
+                return data["data"][0]["embedding"]
+    except Exception as e:
+        logger.error(f"Embedding error: {e}")
+        return None
 
+def search_documents(query_embedding: list, match_count: int = 3) -> list:
+    """Search Supabase for similar document chunks."""
+    if not supabase:
+        return []
+    try:
+        result = supabase.rpc(
+            "match_documents",
+            {"query_embedding": query_embedding, "match_count": match_count}
+        ).execute()
+        return result.data or []
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        return []
+
+# -----------------------------------------------------------------------------
+# AI Response
+# -----------------------------------------------------------------------------
+async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Optional[str], Optional[str]]:
+    """Call OpenRouter chat API."""
     model = FALLBACK_MODEL if use_fallback else MODEL
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "HTTP-Referer": "https://campus-dept-guide.railway.app",
-        "X-Title": "Campus Department Guide Bot",
+        "X-Title": "Campus Guide Bot",
         "Content-Type": "application/json"
     }
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt_text}],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
         "max_tokens": 600
     }
@@ -117,64 +147,57 @@ async def call_openrouter(prompt_text: str, use_fallback: bool = False) -> Tuple
     for attempt in range(MAX_RETRIES):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    OPENROUTER_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT
-                ) as resp:
+                async with session.post(OPENROUTER_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT) as resp:
                     data = await resp.json()
-
                     if "choices" in data:
                         return data["choices"][0]["message"]["content"], None
-
                     elif "error" in data:
-                        err = data["error"].get("message", str(data["error"])).lower()
-                        # Rate limit or temporary issue -> retry
-                        if any(kw in err for kw in ["rate", "limit", "overloaded", "capacity", "high demand"]):
+                        err = data["error"].get("message", "").lower()
+                        if any(kw in err for kw in ["rate", "limit", "overloaded"]):
                             if attempt < MAX_RETRIES - 1:
-                                wait = BASE_DELAY * (2 ** attempt)
-                                logger.warning(f"OpenRouter rate limit. Retry {attempt+1}/{MAX_RETRIES} in {wait:.1f}s")
-                                await asyncio.sleep(wait)
+                                await asyncio.sleep(BASE_DELAY * (2 ** attempt))
                                 continue
-                        return None, data["error"].get("message", "Unknown API error")
-                    else:
-                        logger.error(f"Unexpected OpenRouter response: {data}")
-                        return None, "Unexpected API response structure."
-
+                        return None, data["error"].get("message", "API error")
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout (attempt {attempt+1})")
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(BASE_DELAY * (2 ** attempt))
                 continue
-            return None, "Request timed out."
+            return None, "Timeout"
         except Exception as e:
-            logger.error(f"Exception: {e}")
             return None, str(e)
-
-    return None, "Max retries exceeded."
+    return None, "Max retries exceeded"
 
 async def get_ai_response(user_message: str, is_paid: bool) -> str:
-    """Builds prompt and calls AI with fallback logic."""
+    """Get AI response with RAG for paid users."""
     context_note = ""
     if not is_paid:
-        context_note = f"\n\n[User has NOT paid. Politely encourage the one‑time payment of {PRICE} for full details.]"
+        context_note = f"\n\n[User has NOT paid. Encourage payment of {PRICE} for full details.]"
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{context_note}\n\nStudent: {user_message}\nCampus Guide:"
+        response, _ = await call_openrouter(full_prompt)
+        return response if response else "⚠️ Service unavailable. Try again later."
 
-    full_prompt = f"{SYSTEM_PROMPT}\n\n{context_note}\n\nStudent: {user_message}\nCampus Guide:"
+    # Paid user - try RAG
+    if supabase:
+        embedding = await get_embedding(user_message)
+        if embedding:
+            docs = search_documents(embedding, match_count=3)
+            if docs:
+                context = "\n\n---\n\n".join([d["content"][:800] for d in docs])
+                rag_prompt = f"""{SYSTEM_PROMPT}
 
-    # Try primary model
-    response, error = await call_openrouter(full_prompt)
-    if response:
-        return response
+Use this context from Ethiopian department documents to answer:
+{context}
 
-    # If primary fails, try fallback model
-    logger.warning(f"Primary model failed: {error}. Trying fallback...")
-    response, error = await call_openrouter(full_prompt, use_fallback=True)
-    if response:
-        return response
+Student: {user_message}
+Campus Guide (use context):"""
+                response, _ = await call_openrouter(rag_prompt)
+                if response:
+                    return response
 
-    # Both failed
-    logger.error(f"All models failed. Last error: {error}")
-    if "rate" in str(error).lower() or "limit" in str(error).lower():
-        return "🤖 I'm experiencing high traffic. Please try again in a few minutes."
-    return "⚠️ I'm temporarily unavailable. Please try again later."
+    # Fallback to regular AI
+    full_prompt = f"{SYSTEM_PROMPT}\n\nStudent: {user_message}\nCampus Guide:"
+    response, _ = await call_openrouter(full_prompt)
+    return response if response else "⚠️ Service unavailable. Try again later."
 
 # -----------------------------------------------------------------------------
 # Message Handler
@@ -192,7 +215,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(ai_response)
 
 # -----------------------------------------------------------------------------
-# Payment Proof Handlers (Forward to Admin)
+# Payment Handlers
 # -----------------------------------------------------------------------------
 async def send_approval_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: int,
                                  username: str, file_id: str, is_photo: bool, caption: str):
@@ -211,7 +234,6 @@ async def send_approval_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: in
             await context.bot.send_document(
                 chat_id=ADMIN_USER_ID, document=file_id, caption=caption, reply_markup=reply_markup
             )
-        logger.info(f"Payment proof forwarded for user {user_id}")
     except TelegramError as e:
         logger.error(f"Failed to send to admin: {e}")
 
@@ -230,9 +252,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Document received! You'll get access shortly.")
 
 # -----------------------------------------------------------------------------
-# Admin Approval Callback
+# Approval Callback
 # -----------------------------------------------------------------------------
-approval_cache = {}  # user_id -> timestamp
+approval_cache = {}
 
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -244,14 +266,12 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Invalid user ID.")
         return
 
-    # Prevent duplicate approvals within 1 hour
     now = time.time()
     if user_id in approval_cache and (now - approval_cache[user_id]) < 3600:
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n⚠️ Already approved recently.")
         return
     approval_cache[user_id] = now
 
-    # Check if we can message the user
     try:
         await context.bot.send_chat_action(chat_id=user_id, action="typing")
     except Forbidden:
@@ -259,32 +279,27 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     except BadRequest as e:
         if "chat not found" in str(e).lower():
-            await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ User must start a chat with the bot first.")
+            await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ User must start chat with bot first.")
             return
 
-    # Create one-time invite link
     try:
         invite_link = await context.bot.create_chat_invite_link(
             chat_id=PAID_GROUP_ID, member_limit=1, expire_date=datetime.utcnow() + timedelta(hours=24)
         )
     except TelegramError as e:
-        logger.error(f"Invite link error: {e}")
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Could not create invite link. Check bot permissions.")
         return
 
-    # Send invite to user
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Payment verified!\n\n🔗 Join the paid group here (one‑time link):\n{invite_link.invite_link}\n\nAfter joining, you can ask detailed questions.\n\nNeed help? {SUPPORT_USERNAME}"
+            text=f"✅ Payment verified!\n\n🔗 Join the paid group:\n{invite_link.invite_link}\n\nAfter joining, ask me anything!\n\nSupport: {SUPPORT_USERNAME}"
         )
-        logger.info(f"Invite sent to user {user_id}")
     except TelegramError as e:
-        logger.error(f"Could not send invite: {e}")
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Failed to send invite: {e}")
         return
 
-    await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APPROVED – Invite sent.")
+    await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APPROVED - Invite sent.")
 
 # -----------------------------------------------------------------------------
 # Main
@@ -293,10 +308,6 @@ def main():
     if not TELEGRAM_TOKEN:
         logger.critical("TELEGRAM_BOT_TOKEN missing")
         return
-    if not PAID_GROUP_ID:
-        logger.warning("PAID_GROUP_ID not set")
-    if not OPENROUTER_API_KEY:
-        logger.warning("OPENROUTER_API_KEY not set – AI disabled")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -304,7 +315,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
 
-    logger.info("Bot started with OpenRouter AI.")
+    logger.info("Bot started with RAG (Supabase + OpenRouter)")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
