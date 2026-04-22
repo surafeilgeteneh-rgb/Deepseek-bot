@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Campus Department Guide Bot - FIXED VERSION
-Based on working Qeleme Tutorial bot pattern
+Campus Department Guide Bot - FINAL VERSION
+Fixed Approval + Adjusted Prompt
 """
 
 import os
@@ -46,15 +46,46 @@ logger = logging.getLogger(__name__)
 # Store pending approvals (user_id -> invite_link)
 pending_approvals = {}
 
-SYSTEM_PROMPT = f"""You are Campus Guide, an AI assistant with ONE specific purpose: helping Ethiopian university students choose the right department and career path.
+# -----------------------------------------------------------------------------
+# System Prompt - ADJUSTED: Salary/details ONLY for paid users
+# -----------------------------------------------------------------------------
+SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant with ONE specific purpose: helping Ethiopian university students choose the right department and career path.
 
-You provide information about Ethiopian university departments: Computer Science, Civil Engineering, Accounting, Nursing, Law, Marketing Management, etc., including job outlook, salary ranges in ETB, AI risk, and career prospects.
+**YOUR EXACT PURPOSE:**
+You provide GENERAL information about Ethiopian university departments: Computer Science, Civil Engineering, Accounting, Nursing, Law, Marketing Management, Business Administration, Economics, etc.
 
-You do NOT provide general campus guidance, event updates, or academic advice.
+**WHAT YOU DO FOR FREE USERS:**
+- Give general overviews of what each department studies
+- Explain what careers are possible in broad terms
+- Encourage payment of {PRICE} for detailed information
+- NEVER provide specific salary ranges, AI risk scores, or detailed job outlooks
 
-Payment for full access: {PRICE} via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME}).
+**WHAT YOU DO FOR PAID USERS ONLY:**
+- Provide specific salary ranges in Ethiopian Birr
+- Give AI risk assessments for different careers
+- Share detailed job outlooks and employer information
+- Provide Masters pathways and scholarship opportunities
+- NGO vs private sector comparisons
 
-Keep responses under 250 words. Be specific to Ethiopian context."""
+**FREE USER RESPONSE TEMPLATE:**
+"Here's a general overview of [Department]: [2-3 sentences about what they study and possible careers]. For detailed salary information, AI risk scores, and complete career outlooks, please unlock full access for {PRICE}. Payment via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})."
+
+**PAID USER RESPONSE TEMPLATE:**
+"[Detailed answer with specific salary ranges in ETB, AI risk assessment, and career outlook. Include numbers and specific employers where relevant.]"
+
+**WHAT YOU DO NOT DO:**
+- Never provide campus guidance, event updates, or academic advice
+- Never answer questions outside Ethiopian university departments
+- If asked something outside your purpose: "I'm sorry, but my purpose is strictly to help Ethiopian students with university department and career guidance."
+
+**PAYMENT INFORMATION:**
+- {PRICE} one-time via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})
+- Support: {SUPPORT_USERNAME}
+
+**RESPONSE STYLE:**
+- Friendly, professional, under 200 words
+- Free users: ONLY general overviews, NO numbers
+- Paid users: Include specific ETB salary ranges and data"""
 
 # -----------------------------------------------------------------------------
 # Helper: Check if user is in paid group
@@ -84,7 +115,7 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
-        "max_tokens": 600
+        "max_tokens": 500
     }
 
     attempt = 0
@@ -131,8 +162,12 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
 
 async def get_ai_response(user_message: str, is_paid: bool) -> str:
     prompt = SYSTEM_PROMPT
-    if not is_paid:
-        prompt += f"\n\nUser has NOT paid. Encourage {PRICE} payment."
+    
+    if is_paid:
+        prompt += "\n\nThis user IS a paid member. Provide detailed answers with specific salary ranges in ETB, AI risk scores, and complete career outlooks."
+    else:
+        prompt += f"\n\nThis user is NOT paid. Provide ONLY general overviews. NO salary numbers. Encourage {PRICE} payment."
+    
     prompt += f"\n\nStudent: {user_message}\nCampus Guide:"
 
     response, error = await call_openrouter(prompt)
@@ -147,12 +182,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         f"🎓 Welcome to Campus Department Guide!\n\n"
         f"I help Ethiopian students choose the right university department.\n\n"
-        f"💰 Price: {PRICE}\n\n"
+        f"💰 Full Access: {PRICE} one-time\n\n"
         f"Payment Methods:\n"
         f"- Telebirr: {TELEBIRR_NUMBER} ({TELEBIRR_NAME})\n"
         f"- CBE: {CBE_ACCOUNT} ({CBE_NAME})\n\n"
-        f"Support: {SUPPORT_USERNAME}\n\n"
-        f"Send payment screenshot to unlock full access."
+        f"📸 Send payment screenshot to unlock detailed information.\n\n"
+        f"Support: {SUPPORT_USERNAME}"
     )
     await update.message.reply_text(welcome)
 
@@ -169,7 +204,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invite_link = pending_approvals.pop(user_id)
         await update.message.reply_text(
             f"🎉 Here is your exclusive invite link (one-time use):\n\n{invite_link}\n\n"
-            f"Welcome to the paid community! You can now ask me detailed questions."
+            f"Welcome to the paid community! You can now ask me detailed questions about any department."
         )
         return
     
@@ -212,14 +247,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Received! You'll get access shortly.")
 
 # -----------------------------------------------------------------------------
-# Approval Callback - SIMPLIFIED (Based on working bot)
+# Approval Callback - SIMPLIFIED (No pre-check, fallback to admin)
 # -----------------------------------------------------------------------------
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     try:
-        # Extract user_id from callback data (format: approve_123456789)
         user_id = int(query.data.split('_')[1])
     except (ValueError, IndexError):
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Invalid user ID.")
@@ -231,11 +265,9 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=PAID_GROUP_ID,
             member_limit=1
         )
-        
-        # Store for when user replies
         pending_approvals[user_id] = link.invite_link
         
-        # Send message to user asking them to reply
+        # Try to send message to user
         await context.bot.send_message(
             chat_id=user_id,
             text=(
@@ -243,25 +275,30 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Reply with any message (like 'Ready') to receive your invite link."
             )
         )
-        
-        # Update admin message
         await query.edit_message_caption(caption=f"✅ Approved! Waiting for user {user_id} to reply.")
         
-    except TelegramError as e:
-        logger.error(f"Approval error: {e}")
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Error: {e}")
+    except Exception as e:
+        logger.error(f"Failed to send approval message: {e}")
         
-        # Notify user of error
+        # Fallback: Send link to admin
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"❌ There was an error processing your approval. Please contact {SUPPORT_USERNAME}"
+            link = await context.bot.create_chat_invite_link(
+                chat_id=PAID_GROUP_ID,
+                member_limit=1
             )
-        except:
-            pass
+            await context.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=(
+                    f"⚠️ Could not message user {user_id}.\n\n"
+                    f"📋 Send them this invite link manually:\n{link.invite_link}"
+                )
+            )
+            await query.edit_message_caption(caption=f"{query.message.caption}\n\n⚠️ User unreachable. Link sent to you.")
+        except Exception as e2:
+            await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Error: {e2}")
 
 # -----------------------------------------------------------------------------
-# Main - WITH WEBHOOK CLEARING (Critical fix from working bot)
+# Main - WITH WEBHOOK CLEARING
 # -----------------------------------------------------------------------------
 def main():
     if not TELEGRAM_TOKEN:
