@@ -23,7 +23,7 @@ ADMIN_USER_ID = 8228561129
 
 # OpenRouter settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "deepseek/deepseek-r1:free"
+MODEL = "openrouter/openrouter/free"
 FALLBACK_MODEL = "google/gemini-2.0-flash-exp:free"
 
 TELEBIRR_NUMBER = "0932223736"
