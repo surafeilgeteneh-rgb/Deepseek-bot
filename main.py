@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Campus Department Guide Bot - FINAL VERSION
-- Invite links sent to admin
-- Bot works in DM only
-- Free = general, Paid = detailed
+- Fixed approval (direct to user + backup to admin)
+- Warning in /start
+- PAID_GROUP_ID as integer
+- All other features unchanged
 """
 
 import os
@@ -22,7 +23,7 @@ from telegram.error import TelegramError
 # Configuration
 # -----------------------------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-PAID_GROUP_ID = os.environ.get("PAID_GROUP_ID")
+PAID_GROUP_ID = int(os.environ.get("PAID_GROUP_ID", "0"))
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 ADMIN_USER_ID = 8228561129
@@ -155,12 +156,13 @@ async def get_ai_response(user_message: str, is_paid: bool) -> str:
     return f"⚠️ Service unavailable. Reason: {error}"
 
 # -----------------------------------------------------------------------------
-# Start Command
+# Start Command - WITH WARNING
 # -----------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         f"🎓 Welcome to Campus Department Guide!\n\n"
         f"I help Ethiopian students choose the right university department.\n\n"
+        f"⚠️ IMPORTANT: You MUST keep this chat open. If you block or don't start the bot, you won't receive your access link.\n\n"
         f"💰 Full Access: {PRICE} one-time\n\n"
         f"Payment Methods:\n"
         f"- Telebirr: {TELEBIRR_NUMBER} ({TELEBIRR_NAME})\n"
@@ -229,7 +231,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Received! You'll get access shortly.")
 
 # -----------------------------------------------------------------------------
-# Approval Callback - Sends Link to Admin (100% Reliable)
+# Approval Callback - FIXED (Direct to User + Backup to Admin)
 # -----------------------------------------------------------------------------
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -248,37 +250,53 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             member_limit=1
         )
         
-        # ALWAYS send link to ADMIN
-        await context.bot.send_message(
-            chat_id=ADMIN_USER_ID,
-            text=(
-                f"✅ APPROVED - User ID: {user_id}\n\n"
-                f"📋 Send this invite link to the user:\n{link.invite_link}\n\n"
-                f"⚠️ Remind them to click @CampusDeptGuideBot and press START."
-            )
-        )
+        user_notified = False
         
-        # Optional: Try to notify user
+        # Try to send directly to user
         try:
             await context.bot.send_message(
                 chat_id=user_id,
                 text=(
-                    f"✅ Your payment has been approved!\n\n"
-                    f"The admin will send your invite link shortly.\n\n"
+                    f"✅ PAYMENT APPROVED!\n\n"
+                    f"Here is your exclusive invite link (one-time use):\n{link.invite_link}\n\n"
+                    f"Welcome to the paid community! After joining, ask me detailed questions.\n\n"
                     f"Support: {SUPPORT_USERNAME}"
                 )
             )
-        except:
-            pass
+            user_notified = True
+        except Exception as e:
+            logger.error(f"Failed to message user {user_id}: {e}")
+            
+            # Notify admin that user didn't start bot
+            await context.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=(
+                    f"⚠️ Cannot message user {user_id}. They didn't start the bot.\n\n"
+                    f"📋 Send them this invite link manually:\n{link.invite_link}\n\n"
+                    f"Tell them to click @CampusDeptGuideBot and press START first."
+                )
+            )
         
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ Approved! Link sent to you.")
+        # Always send backup to admin
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=(
+                f"✅ Approved user {user_id}\n"
+                f"📋 Backup link: {link.invite_link}\n"
+                f"📨 User notified: {'Yes' if user_notified else 'No'}"
+            )
+        )
+        
+        # Update admin message
+        status = "✅ Approved! Link sent to user." if user_notified else "⚠️ Approved. User must START bot. Link sent to you."
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n{status}")
         
     except Exception as e:
         logger.error(f"Approval error: {e}")
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Error: {e}")
 
 # -----------------------------------------------------------------------------
-# Main
+# Main - WITH WEBHOOK CLEARING
 # -----------------------------------------------------------------------------
 def main():
     if not TELEGRAM_TOKEN:
