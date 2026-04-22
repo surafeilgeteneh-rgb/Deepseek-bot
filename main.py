@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Campus Department Guide Bot - FINAL VERSION
-Fixed Approval + Adjusted Prompt
+- Invite links sent to admin
+- Bot works in DM only
+- Free = general, Paid = detailed
 """
 
 import os
@@ -43,49 +45,27 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=60)
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Store pending approvals (user_id -> invite_link)
-pending_approvals = {}
-
 # -----------------------------------------------------------------------------
-# System Prompt - ADJUSTED: Salary/details ONLY for paid users
+# System Prompt - Strict Free vs Paid
 # -----------------------------------------------------------------------------
-SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant with ONE specific purpose: helping Ethiopian university students choose the right department and career path.
+SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant for Ethiopian university students.
 
-**YOUR EXACT PURPOSE:**
-You provide GENERAL information about Ethiopian university departments: Computer Science, Civil Engineering, Accounting, Nursing, Law, Marketing Management, Business Administration, Economics, etc.
+**FREE USERS (not in paid group):**
+- Give ONLY general overviews of departments
+- NO salary numbers, NO AI risk scores, NO detailed job outlooks
+- Encourage payment of {PRICE} for full access
+- Template: "Here's a general overview of [Department]. For detailed salary information and career outlooks, unlock full access for {PRICE}. Pay via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})."
 
-**WHAT YOU DO FOR FREE USERS:**
-- Give general overviews of what each department studies
-- Explain what careers are possible in broad terms
-- Encourage payment of {PRICE} for detailed information
-- NEVER provide specific salary ranges, AI risk scores, or detailed job outlooks
-
-**WHAT YOU DO FOR PAID USERS ONLY:**
-- Provide specific salary ranges in Ethiopian Birr
-- Give AI risk assessments for different careers
+**PAID USERS (in paid group):**
+- Provide specific salary ranges in ETB
+- Give AI risk assessments
 - Share detailed job outlooks and employer information
-- Provide Masters pathways and scholarship opportunities
-- NGO vs private sector comparisons
+- Provide Masters pathways
 
-**FREE USER RESPONSE TEMPLATE:**
-"Here's a general overview of [Department]: [2-3 sentences about what they study and possible careers]. For detailed salary information, AI risk scores, and complete career outlooks, please unlock full access for {PRICE}. Payment via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})."
+**Payment:** {PRICE} via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})
+**Support:** {SUPPORT_USERNAME}
 
-**PAID USER RESPONSE TEMPLATE:**
-"[Detailed answer with specific salary ranges in ETB, AI risk assessment, and career outlook. Include numbers and specific employers where relevant.]"
-
-**WHAT YOU DO NOT DO:**
-- Never provide campus guidance, event updates, or academic advice
-- Never answer questions outside Ethiopian university departments
-- If asked something outside your purpose: "I'm sorry, but my purpose is strictly to help Ethiopian students with university department and career guidance."
-
-**PAYMENT INFORMATION:**
-- {PRICE} one-time via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})
-- Support: {SUPPORT_USERNAME}
-
-**RESPONSE STYLE:**
-- Friendly, professional, under 200 words
-- Free users: ONLY general overviews, NO numbers
-- Paid users: Include specific ETB salary ranges and data"""
+Keep responses under 200 words. Be specific to Ethiopian context."""
 
 # -----------------------------------------------------------------------------
 # Helper: Check if user is in paid group
@@ -126,7 +106,6 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
         attempt += 1
         try:
             async with aiohttp.ClientSession() as session:
-                logger.info(f"Attempt {attempt}: Calling OpenRouter with model: {model}")
                 async with session.post(OPENROUTER_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT) as resp:
                     data = await resp.json()
 
@@ -192,20 +171,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome)
 
 # -----------------------------------------------------------------------------
-# Message Handler
+# Message Handler (DM Only)
 # -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     user_message = update.message.text.strip()
     
-    # Check if user has a pending approval
-    if user_id in pending_approvals:
-        invite_link = pending_approvals.pop(user_id)
-        await update.message.reply_text(
-            f"🎉 Here is your exclusive invite link (one-time use):\n\n{invite_link}\n\n"
-            f"Welcome to the paid community! You can now ask me detailed questions about any department."
-        )
+    # Only respond to private messages
+    if update.effective_chat.type != "private":
         return
     
     logger.info(f"Message from @{user.username or user_id}: {user_message[:100]}")
@@ -216,9 +190,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(ai_response)
 
 # -----------------------------------------------------------------------------
-# Payment Handlers
+# Payment Handlers (DM Only)
 # -----------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only respond to private messages
+    if update.effective_chat.type != "private":
+        return
+    
     user = update.effective_user
     photo = update.message.photo[-1]
     
@@ -233,6 +211,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Received! You'll get access shortly.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only respond to private messages
+    if update.effective_chat.type != "private":
+        return
+    
     user = update.effective_user
     doc = update.message.document
     
@@ -247,7 +229,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Received! You'll get access shortly.")
 
 # -----------------------------------------------------------------------------
-# Approval Callback - SIMPLIFIED (No pre-check, fallback to admin)
+# Approval Callback - Sends Link to Admin (100% Reliable)
 # -----------------------------------------------------------------------------
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -265,40 +247,38 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=PAID_GROUP_ID,
             member_limit=1
         )
-        pending_approvals[user_id] = link.invite_link
         
-        # Try to send message to user
+        # ALWAYS send link to ADMIN
         await context.bot.send_message(
-            chat_id=user_id,
+            chat_id=ADMIN_USER_ID,
             text=(
-                f"✅ PAYMENT APPROVED!\n\n"
-                f"Reply with any message (like 'Ready') to receive your invite link."
+                f"✅ APPROVED - User ID: {user_id}\n\n"
+                f"📋 Send this invite link to the user:\n{link.invite_link}\n\n"
+                f"⚠️ Remind them to click @CampusDeptGuideBot and press START."
             )
         )
-        await query.edit_message_caption(caption=f"✅ Approved! Waiting for user {user_id} to reply.")
         
-    except Exception as e:
-        logger.error(f"Failed to send approval message: {e}")
-        
-        # Fallback: Send link to admin
+        # Optional: Try to notify user
         try:
-            link = await context.bot.create_chat_invite_link(
-                chat_id=PAID_GROUP_ID,
-                member_limit=1
-            )
             await context.bot.send_message(
-                chat_id=ADMIN_USER_ID,
+                chat_id=user_id,
                 text=(
-                    f"⚠️ Could not message user {user_id}.\n\n"
-                    f"📋 Send them this invite link manually:\n{link.invite_link}"
+                    f"✅ Your payment has been approved!\n\n"
+                    f"The admin will send your invite link shortly.\n\n"
+                    f"Support: {SUPPORT_USERNAME}"
                 )
             )
-            await query.edit_message_caption(caption=f"{query.message.caption}\n\n⚠️ User unreachable. Link sent to you.")
-        except Exception as e2:
-            await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Error: {e2}")
+        except:
+            pass
+        
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ Approved! Link sent to you.")
+        
+    except Exception as e:
+        logger.error(f"Approval error: {e}")
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Error: {e}")
 
 # -----------------------------------------------------------------------------
-# Main - WITH WEBHOOK CLEARING
+# Main
 # -----------------------------------------------------------------------------
 def main():
     if not TELEGRAM_TOKEN:
@@ -307,18 +287,17 @@ def main():
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
     
-    # CRITICAL: Clear webhook before polling
+    # Clear webhook before polling
     print("Clearing webhook...")
     app.bot.delete_webhook(drop_pending_updates=True)
     
-    logger.info("Bot started with clean polling mode.")
+    logger.info("Bot started - DM only, free=general, paid=detailed.")
     app.run_polling()
 
 if __name__ == "__main__":
