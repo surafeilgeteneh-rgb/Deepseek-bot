@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Campus Department Guide Bot
-Final Version - AI Working + Smart Approval Flow
+Campus Department Guide Bot - FIXED VERSION
+Based on working Qeleme Tutorial bot pattern
 """
 
 import os
 import logging
 import asyncio
-import time
 import random
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.error import TelegramError, Forbidden, BadRequest
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.error import TelegramError
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -44,47 +43,18 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=60)
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant with ONE specific purpose: helping Ethiopian university students choose the right department and career path.
-
-**YOUR EXACT PURPOSE:**
-You provide information about:
-- Ethiopian university departments: Computer Science, Civil Engineering, Accounting, Nursing, Law, Marketing Management, Business Administration, Economics, etc.
-- Job outlook, salary ranges (in Ethiopian Birr), and career prospects in Ethiopia
-- AI risk assessment for different careers in the Ethiopian context
-- Masters pathways and scholarship opportunities
-- NGO vs private sector opportunities
-
-**WHAT YOU DO NOT DO:**
-- You do NOT provide "campus guidance," "event updates," "resource directions," or "academic advice" beyond department and career information.
-- You do NOT answer questions about topics outside Ethiopian university departments and careers.
-- If asked about something outside your purpose, politely say: "I'm sorry, but my purpose is strictly to help Ethiopian students with university department and career guidance. I cannot answer questions outside this scope."
-
-**YOUR KNOWLEDGE:**
-You have access to information about popular Ethiopian university departments including:
-- Computer Science (AAU): High demand in fintech/AI, 8k-45k ETB, low AI risk
-- Civil Engineering (AASTU): Consistent demand in construction, 7k-40k ETB, very low AI risk
-- Accounting (Unity): Stable demand, 6k-35k ETB, medium AI risk
-- Nursing (Jimma): Very high demand, 7k-30k ETB, very low AI risk
-- Law (Haramaya): Moderate but competitive, 6k-50k+ ETB, low AI risk
-- Marketing Management: Growing demand in digital marketing, 6k-35k ETB, medium AI risk
-
-**FREE vs PAID ACCESS:**
-- Free users receive general overviews and encouragement to pay {PRICE} for full details.
-- Paid users (members of our exclusive group) get comprehensive reports including employer lists, 5-year projections, and personalized career path guidance.
-
-**PAYMENT INFORMATION:**
-- {PRICE} one-time payment via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})
-- After payment, upload screenshot to receive access to the paid group.
-
-**RESPONSE STYLE:**
-- Friendly, professional, and specific to Ethiopian context
-- Under 250 words unless detailed information is requested
-- Always mention specific departments and realistic Ethiopian salary ranges
-- If human support is needed, direct to {SUPPORT_USERNAME}
-
-Remember: You are an Ethiopian university department career guide, NOT a general campus assistant."""
 # Store pending approvals (user_id -> invite_link)
 pending_approvals = {}
+
+SYSTEM_PROMPT = f"""You are Campus Guide, an AI assistant with ONE specific purpose: helping Ethiopian university students choose the right department and career path.
+
+You provide information about Ethiopian university departments: Computer Science, Civil Engineering, Accounting, Nursing, Law, Marketing Management, etc., including job outlook, salary ranges in ETB, AI risk, and career prospects.
+
+You do NOT provide general campus guidance, event updates, or academic advice.
+
+Payment for full access: {PRICE} via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME}).
+
+Keep responses under 250 words. Be specific to Ethiopian context."""
 
 # -----------------------------------------------------------------------------
 # Helper: Check if user is in paid group
@@ -103,7 +73,6 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
 # AI: Call OpenRouter
 # -----------------------------------------------------------------------------
 async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Optional[str], Optional[str]]:
-    """Calls OpenRouter with robust retries and automatic fallback."""
     model = FALLBACK_MODEL if use_fallback else PRIMARY_MODEL
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -119,7 +88,7 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
     }
 
     attempt = 0
-    max_retries = 5
+    max_retries = 3
     base_delay = 5
 
     while attempt < max_retries:
@@ -129,45 +98,30 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
                 logger.info(f"Attempt {attempt}: Calling OpenRouter with model: {model}")
                 async with session.post(OPENROUTER_URL, headers=headers, json=payload, timeout=REQUEST_TIMEOUT) as resp:
                     data = await resp.json()
-                    logger.info(f"OpenRouter response: {data}")
 
                     if "choices" in data:
                         return data["choices"][0]["message"]["content"], None
 
                     error = data.get("error", {})
-                    error_code = error.get("code", resp.status)
                     error_msg = error.get("message", "Unknown error")
 
-                    # If it's a model routing error, try the fallback model
-                    if "No endpoints found" in error_msg or "not a valid model ID" in error_msg:
-                        if not use_fallback:
-                            logger.warning(f"Model routing error for {model}. Switching to fallback...")
-                            return await call_openrouter(prompt, use_fallback=True)
-                        else:
-                            logger.error("Fallback model also failed.")
-                            return None, f"Model routing error: {error_msg}"
+                    if "No endpoints found" in error_msg and not use_fallback:
+                        logger.warning(f"Routing error. Switching to fallback...")
+                        return await call_openrouter(prompt, use_fallback=True)
 
-                    if error_code == 429 or "rate" in error_msg.lower() or "exhausted" in error_msg.lower():
-                        if attempt == max_retries:
-                            logger.error("Max retries reached for rate limit.")
-                            return None, "Rate limit exceeded. Please try again later."
-                        
-                        delay = (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 2)
-                        logger.warning(f"Rate limited. Retrying in {delay:.1f}s...")
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
                         await asyncio.sleep(delay)
                         continue
 
-                    logger.error(f"OpenRouter API error: {error_code} - {error_msg}")
                     return None, error_msg
 
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout on attempt {attempt}")
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * attempt)
                 continue
             return None, "Request timed out."
         except Exception as e:
-            logger.error(f"Exception on attempt {attempt}: {e}")
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * attempt)
                 continue
@@ -178,13 +132,29 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
 async def get_ai_response(user_message: str, is_paid: bool) -> str:
     prompt = SYSTEM_PROMPT
     if not is_paid:
-        prompt += f"\n\nUser has NOT paid. Encourage {PRICE} payment for full details."
+        prompt += f"\n\nUser has NOT paid. Encourage {PRICE} payment."
     prompt += f"\n\nStudent: {user_message}\nCampus Guide:"
 
     response, error = await call_openrouter(prompt)
     if response:
         return response
     return f"⚠️ Service unavailable. Reason: {error}"
+
+# -----------------------------------------------------------------------------
+# Start Command
+# -----------------------------------------------------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome = (
+        f"🎓 Welcome to Campus Department Guide!\n\n"
+        f"I help Ethiopian students choose the right university department.\n\n"
+        f"💰 Price: {PRICE}\n\n"
+        f"Payment Methods:\n"
+        f"- Telebirr: {TELEBIRR_NUMBER} ({TELEBIRR_NAME})\n"
+        f"- CBE: {CBE_ACCOUNT} ({CBE_NAME})\n\n"
+        f"Support: {SUPPORT_USERNAME}\n\n"
+        f"Send payment screenshot to unlock full access."
+    )
+    await update.message.reply_text(welcome)
 
 # -----------------------------------------------------------------------------
 # Message Handler
@@ -194,23 +164,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     user_message = update.message.text.strip()
     
-    # Check if user has a pending approval (waiting for their reply)
+    # Check if user has a pending approval
     if user_id in pending_approvals:
         invite_link = pending_approvals.pop(user_id)
         await update.message.reply_text(
             f"🎉 Here is your exclusive invite link (one-time use):\n\n{invite_link}\n\n"
-            f"Welcome to the paid community! You can now ask me detailed questions about any department."
+            f"Welcome to the paid community! You can now ask me detailed questions."
         )
         return
     
-    # Normal message handling
-    logger.info(f"✅ Message received from @{user.username or user_id}: {user_message[:100]}")
+    logger.info(f"Message from @{user.username or user_id}: {user_message[:100]}")
 
     is_paid = await is_user_in_paid_group(user_id, context)
-    logger.info(f"Paid status for {user_id}: {is_paid}")
-
     await update.message.chat.send_action(action="typing")
-    logger.info("Calling AI...")
     ai_response = await get_ai_response(user_message, is_paid)
     await update.message.reply_text(ai_response)
 
@@ -220,9 +186,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     photo = update.message.photo[-1]
+    
     keyboard = [[InlineKeyboardButton(f"✅ Approve @{user.username or user.id}", callback_data=f"approve_{user.id}")]]
+    
     await context.bot.send_photo(
-        chat_id=ADMIN_USER_ID, photo=photo.file_id,
+        chat_id=ADMIN_USER_ID,
+        photo=photo.file_id,
         caption=f"Payment from @{user.username or user.id} (ID: {user.id})",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -231,56 +200,68 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     doc = update.message.document
+    
     keyboard = [[InlineKeyboardButton(f"✅ Approve @{user.username or user.id}", callback_data=f"approve_{user.id}")]]
+    
     await context.bot.send_document(
-        chat_id=ADMIN_USER_ID, document=doc.file_id,
+        chat_id=ADMIN_USER_ID,
+        document=doc.file_id,
         caption=f"Payment document from @{user.username or user.id} (ID: {user.id})",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    await update.message.reply_text("✅ Document received! You'll get access shortly.")
+    await update.message.reply_text("✅ Received! You'll get access shortly.")
 
 # -----------------------------------------------------------------------------
-# Approval Callback (Smart Two-Step)
+# Approval Callback - SIMPLIFIED (Based on working bot)
 # -----------------------------------------------------------------------------
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     try:
-        user_id = int(query.data.replace("approve_", ""))
-    except ValueError:
+        # Extract user_id from callback data (format: approve_123456789)
+        user_id = int(query.data.split('_')[1])
+    except (ValueError, IndexError):
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Invalid user ID.")
         return
 
     # Create invite link
     try:
-        invite_link = await context.bot.create_chat_invite_link(
+        link = await context.bot.create_chat_invite_link(
             chat_id=PAID_GROUP_ID,
-            member_limit=1,
-            expire_date=datetime.utcnow() + timedelta(hours=24)
+            member_limit=1
         )
-    except TelegramError as e:
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Could not create invite link: {e}")
-        return
-
-    # Store the invite link for this user
-    pending_approvals[user_id] = invite_link.invite_link
-
-    # Ask user to reply
-    try:
+        
+        # Store for when user replies
+        pending_approvals[user_id] = link.invite_link
+        
+        # Send message to user asking them to reply
         await context.bot.send_message(
             chat_id=user_id,
             text=(
-                f"✅ Your payment has been approved!\n\n"
-                f"Reply with any message (like 'Yes' or 'Ready') to receive your invite link."
+                f"✅ PAYMENT APPROVED!\n\n"
+                f"Reply with any message (like 'Ready') to receive your invite link."
             )
         )
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APPROVED - Waiting for user reply.")
-    except Exception as e:
+        
+        # Update admin message
+        await query.edit_message_caption(caption=f"✅ Approved! Waiting for user {user_id} to reply.")
+        
+    except TelegramError as e:
+        logger.error(f"Approval error: {e}")
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Error: {e}")
+        
+        # Notify user of error
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ There was an error processing your approval. Please contact {SUPPORT_USERNAME}"
+            )
+        except:
+            pass
 
 # -----------------------------------------------------------------------------
-# Main
+# Main - WITH WEBHOOK CLEARING (Critical fix from working bot)
 # -----------------------------------------------------------------------------
 def main():
     if not TELEGRAM_TOKEN:
@@ -288,13 +269,20 @@ def main():
         return
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
     
-    logger.info("Bot started with smart approval flow.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # CRITICAL: Clear webhook before polling
+    print("Clearing webhook...")
+    app.bot.delete_webhook(drop_pending_updates=True)
+    
+    logger.info("Bot started with clean polling mode.")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
