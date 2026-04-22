@@ -24,9 +24,8 @@ ADMIN_USER_ID = 8228561129
 # OpenRouter settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # The correct primary model ID (verified from troubleshooting guides)
-PRIMARY_MODEL = "deepseek/deepseek-r1:free"
-# A reliable fallback model (also verified)
-FALLBACK_MODEL = "google/gemini-2.0-flash-exp:free"
+PRIMARY_MODEL = "deepseek/deepseek-r1"
+FALLBACK_MODEL = "google/gemini-2.0-flash-exp"
 
 TELEBIRR_NUMBER = "0932223736"
 TELEBIRR_NAME = "Banch"
