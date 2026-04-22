@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+Campus Department Guide Bot
+Final Version - AI Working + Smart Approval Flow
+"""
+
 import os
 import logging
 import asyncio
@@ -23,10 +28,10 @@ ADMIN_USER_ID = 8228561129
 
 # OpenRouter settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-# The correct primary model ID (verified from troubleshooting guides)
 PRIMARY_MODEL = "deepseek/deepseek-r1"
 FALLBACK_MODEL = "google/gemini-2.0-flash-exp"
 
+# Payment details
 TELEBIRR_NUMBER = "0932223736"
 TELEBIRR_NAME = "Banch"
 CBE_ACCOUNT = "1000748634456"
@@ -39,10 +44,50 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=60)
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""You are Campus Guide, helping Ethiopian students.
-Payment: {PRICE} via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME}).
-Keep responses under 250 words."""
+SYSTEM_PROMPT = f"""You are **Campus Guide**, an AI assistant with ONE specific purpose: helping Ethiopian university students choose the right department and career path.
 
+**YOUR EXACT PURPOSE:**
+You provide information about:
+- Ethiopian university departments: Computer Science, Civil Engineering, Accounting, Nursing, Law, Marketing Management, Business Administration, Economics, etc.
+- Job outlook, salary ranges (in Ethiopian Birr), and career prospects in Ethiopia
+- AI risk assessment for different careers in the Ethiopian context
+- Masters pathways and scholarship opportunities
+- NGO vs private sector opportunities
+
+**WHAT YOU DO NOT DO:**
+- You do NOT provide "campus guidance," "event updates," "resource directions," or "academic advice" beyond department and career information.
+- You do NOT answer questions about topics outside Ethiopian university departments and careers.
+- If asked about something outside your purpose, politely say: "I'm sorry, but my purpose is strictly to help Ethiopian students with university department and career guidance. I cannot answer questions outside this scope."
+
+**YOUR KNOWLEDGE:**
+You have access to information about popular Ethiopian university departments including:
+- Computer Science (AAU): High demand in fintech/AI, 8k-45k ETB, low AI risk
+- Civil Engineering (AASTU): Consistent demand in construction, 7k-40k ETB, very low AI risk
+- Accounting (Unity): Stable demand, 6k-35k ETB, medium AI risk
+- Nursing (Jimma): Very high demand, 7k-30k ETB, very low AI risk
+- Law (Haramaya): Moderate but competitive, 6k-50k+ ETB, low AI risk
+- Marketing Management: Growing demand in digital marketing, 6k-35k ETB, medium AI risk
+
+**FREE vs PAID ACCESS:**
+- Free users receive general overviews and encouragement to pay {PRICE} for full details.
+- Paid users (members of our exclusive group) get comprehensive reports including employer lists, 5-year projections, and personalized career path guidance.
+
+**PAYMENT INFORMATION:**
+- {PRICE} one-time payment via Telebirr {TELEBIRR_NUMBER} ({TELEBIRR_NAME}) or CBE {CBE_ACCOUNT} ({CBE_NAME})
+- After payment, upload screenshot to receive access to the paid group.
+
+**RESPONSE STYLE:**
+- Friendly, professional, and specific to Ethiopian context
+- Under 250 words unless detailed information is requested
+- Always mention specific departments and realistic Ethiopian salary ranges
+- If human support is needed, direct to {SUPPORT_USERNAME}
+
+Remember: You are an Ethiopian university department career guide, NOT a general campus assistant."""
+# Store pending approvals (user_id -> invite_link)
+pending_approvals = {}
+
+# -----------------------------------------------------------------------------
+# Helper: Check if user is in paid group
 # -----------------------------------------------------------------------------
 async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not PAID_GROUP_ID:
@@ -54,6 +99,8 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Group check error: {e}")
         return False
 
+# -----------------------------------------------------------------------------
+# AI: Call OpenRouter
 # -----------------------------------------------------------------------------
 async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """Calls OpenRouter with robust retries and automatic fallback."""
@@ -91,10 +138,10 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
                     error_code = error.get("code", resp.status)
                     error_msg = error.get("message", "Unknown error")
 
-                    # If it's a model routing error (e.g., "No endpoints found"), try the fallback model
+                    # If it's a model routing error, try the fallback model
                     if "No endpoints found" in error_msg or "not a valid model ID" in error_msg:
                         if not use_fallback:
-                            logger.warning(f"Model routing error for {model}. Switching to fallback model...")
+                            logger.warning(f"Model routing error for {model}. Switching to fallback...")
                             return await call_openrouter(prompt, use_fallback=True)
                         else:
                             logger.error("Fallback model also failed.")
@@ -105,13 +152,12 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
                             logger.error("Max retries reached for rate limit.")
                             return None, "Rate limit exceeded. Please try again later."
                         
-                        # Exponential backoff with jitter
                         delay = (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 2)
-                        logger.warning(f"Rate limited (HTTP {error_code}). Retrying in {delay:.1f}s...")
+                        logger.warning(f"Rate limited. Retrying in {delay:.1f}s...")
                         await asyncio.sleep(delay)
                         continue
 
-                    logger.error(f"OpenRouter API error (non-retryable): {error_code} - {error_msg}")
+                    logger.error(f"OpenRouter API error: {error_code} - {error_msg}")
                     return None, error_msg
 
         except asyncio.TimeoutError:
@@ -132,7 +178,7 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
 async def get_ai_response(user_message: str, is_paid: bool) -> str:
     prompt = SYSTEM_PROMPT
     if not is_paid:
-        prompt += f"\n\nUser has NOT paid. Encourage {PRICE} payment."
+        prompt += f"\n\nUser has NOT paid. Encourage {PRICE} payment for full details."
     prompt += f"\n\nStudent: {user_message}\nCampus Guide:"
 
     response, error = await call_openrouter(prompt)
@@ -141,10 +187,23 @@ async def get_ai_response(user_message: str, is_paid: bool) -> str:
     return f"⚠️ Service unavailable. Reason: {error}"
 
 # -----------------------------------------------------------------------------
+# Message Handler
+# -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     user_message = update.message.text.strip()
+    
+    # Check if user has a pending approval (waiting for their reply)
+    if user_id in pending_approvals:
+        invite_link = pending_approvals.pop(user_id)
+        await update.message.reply_text(
+            f"🎉 Here is your exclusive invite link (one-time use):\n\n{invite_link}\n\n"
+            f"Welcome to the paid community! You can now ask me detailed questions about any department."
+        )
+        return
+    
+    # Normal message handling
     logger.info(f"✅ Message received from @{user.username or user_id}: {user_message[:100]}")
 
     is_paid = await is_user_in_paid_group(user_id, context)
@@ -155,6 +214,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ai_response = await get_ai_response(user_message, is_paid)
     await update.message.reply_text(ai_response)
 
+# -----------------------------------------------------------------------------
+# Payment Handlers
 # -----------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -167,34 +228,72 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text("✅ Received! You'll get access shortly.")
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    doc = update.message.document
+    keyboard = [[InlineKeyboardButton(f"✅ Approve @{user.username or user.id}", callback_data=f"approve_{user.id}")]]
+    await context.bot.send_document(
+        chat_id=ADMIN_USER_ID, document=doc.file_id,
+        caption=f"Payment document from @{user.username or user.id} (ID: {user.id})",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    await update.message.reply_text("✅ Document received! You'll get access shortly.")
+
+# -----------------------------------------------------------------------------
+# Approval Callback (Smart Two-Step)
+# -----------------------------------------------------------------------------
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     try:
         user_id = int(query.data.replace("approve_", ""))
+    except ValueError:
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Invalid user ID.")
+        return
+
+    # Create invite link
+    try:
         invite_link = await context.bot.create_chat_invite_link(
-            chat_id=PAID_GROUP_ID, member_limit=1, expire_date=datetime.utcnow() + timedelta(hours=24)
+            chat_id=PAID_GROUP_ID,
+            member_limit=1,
+            expire_date=datetime.utcnow() + timedelta(hours=24)
         )
+    except TelegramError as e:
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Could not create invite link: {e}")
+        return
+
+    # Store the invite link for this user
+    pending_approvals[user_id] = invite_link.invite_link
+
+    # Ask user to reply
+    try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Payment verified!\n🔗 Join: {invite_link.invite_link}\nSupport: {SUPPORT_USERNAME}"
+            text=(
+                f"✅ Your payment has been approved!\n\n"
+                f"Reply with any message (like 'Yes' or 'Ready') to receive your invite link."
+            )
         )
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APPROVED")
-    except (Forbidden, BadRequest) as e:
-        logger.warning(f"Could not message user {user_id}: {e}")
-        await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ User must message @CampusDeptGuideBot first.")
+        await query.edit_message_caption(caption=f"{query.message.caption}\n\n✅ APPROVED - Waiting for user reply.")
     except Exception as e:
         await query.edit_message_caption(caption=f"{query.message.caption}\n\n❌ Error: {e}")
 
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 def main():
     if not TELEGRAM_TOKEN:
         logger.critical("Missing TELEGRAM_BOT_TOKEN")
         return
+    
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
-    logger.info("Bot started with robust OpenRouter handling and fallback.")
+    
+    logger.info("Bot started with smart approval flow.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
