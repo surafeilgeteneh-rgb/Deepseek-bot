@@ -23,7 +23,9 @@ ADMIN_USER_ID = 8228561129
 
 # OpenRouter settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODELS = "deepseek/deepseek-r1:free"
+# The correct primary model ID (verified from troubleshooting guides)
+PRIMARY_MODEL = "deepseek/deepseek-r1:free"
+# A reliable fallback model (also verified)
 FALLBACK_MODEL = "google/gemini-2.0-flash-exp:free"
 
 TELEBIRR_NUMBER = "0932223736"
@@ -55,8 +57,8 @@ async def is_user_in_paid_group(user_id: int, context: ContextTypes.DEFAULT_TYPE
 
 # -----------------------------------------------------------------------------
 async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Optional[str], Optional[str]]:
-    """Calls OpenRouter with exponential backoff and jitter on rate limits."""
-    model = FALLBACK_MODEL if use_fallback else MODEL
+    """Calls OpenRouter with robust retries and automatic fallback."""
+    model = FALLBACK_MODEL if use_fallback else PRIMARY_MODEL
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "HTTP-Referer": "https://campus-dept-guide.railway.app",
@@ -89,6 +91,15 @@ async def call_openrouter(prompt: str, use_fallback: bool = False) -> Tuple[Opti
                     error = data.get("error", {})
                     error_code = error.get("code", resp.status)
                     error_msg = error.get("message", "Unknown error")
+
+                    # If it's a model routing error (e.g., "No endpoints found"), try the fallback model
+                    if "No endpoints found" in error_msg or "not a valid model ID" in error_msg:
+                        if not use_fallback:
+                            logger.warning(f"Model routing error for {model}. Switching to fallback model...")
+                            return await call_openrouter(prompt, use_fallback=True)
+                        else:
+                            logger.error("Fallback model also failed.")
+                            return None, f"Model routing error: {error_msg}"
 
                     if error_code == 429 or "rate" in error_msg.lower() or "exhausted" in error_msg.lower():
                         if attempt == max_retries:
@@ -184,7 +195,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
-    logger.info("Bot started with robust OpenRouter handling.")
+    logger.info("Bot started with robust OpenRouter handling and fallback.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
